@@ -64,6 +64,48 @@ class PackageInstaller:
             else:
                 raise ValueError(f"Unsupported package type '{pkg_type}' for package '{pkg_to_install}'.")
 
+    def _handle_build_failure(self, output: str, stage_name: str) -> None:
+        """Parses build error log output and prints actionable diagnostic details."""
+        import re
+        missing_headers = re.findall(r"fatal error:\s*([^\s:]+\.h):\s*No such file or directory", output)
+        missing_pkgconfigs = re.findall(r"Could NOT find ([^\s]+)\s+\(missing:", output, re.IGNORECASE) or \
+                             re.findall(r"Package ['\"]?([^'\"\s]+)['\"]? not found", output)
+
+        msg = [f"{stage_name} failed.\n"]
+        if missing_headers or missing_pkgconfigs:
+            msg.append("DIAGNOSTIC HINT: Missing system compilation prerequisites detected.")
+            if missing_headers:
+                unique_headers = sorted(list(set(missing_headers)))
+                msg.append(f"  Missing Header(s): {', '.join(unique_headers)}")
+                # Known package mapping hints
+                hints = []
+                for header in unique_headers:
+                    if "vulkan" in header:
+                        hints.append("vulkan development package (e.g., 'libvulkan-dev' on Ubuntu/Debian, 'vulkan-headers' on Fedora/Arch)")
+                    elif "wayland" in header:
+                        hints.append("wayland development package (e.g., 'libwayland-dev' or 'wayland-protocols')")
+                    elif "x11" in header or "X11" in header:
+                        hints.append("X11 development package (e.g., 'libx11-dev' or 'libxcb1-dev')")
+                    elif "pci" in header:
+                        hints.append("pciutils development package (e.g., 'libpci-dev' or 'pciutils-devel')")
+                if hints:
+                    msg.append("  Suggested System Packages: " + "; ".join(hints))
+
+            if missing_pkgconfigs:
+                unique_pkgs = sorted(list(set(missing_pkgconfigs)))
+                msg.append(f"  Missing Library/Module(s): {', '.join(unique_pkgs)}")
+
+            msg.append("\nNote: Aster does not manage or automatically install system C/C++ development libraries.")
+            msg.append("Please install the required system development header packages using your Linux distribution's package manager.")
+        else:
+            # Print excerpt of stderr if no specific missing headers identified
+            lines = [l for l in output.splitlines() if "error:" in l or "Error" in l or "fatal:" in l]
+            if lines:
+                msg.append("Error excerpt:")
+                msg.extend(lines[:10])
+
+        raise RuntimeError("\n".join(msg))
+
     def _check_binary_conflicts(self, provided_binaries: List[str], current_package_id: str):
         """Checks if provided binary links conflict with existing commands in bin_dir."""
         for binary_name in provided_binaries:
@@ -284,18 +326,18 @@ class PackageInstaller:
                 capture_output=True, text=True, env=clean_env
             )
             if res.returncode != 0:
-                raise RuntimeError(f"CMake configuration failed: {res.stderr}")
+                self._handle_build_failure(res.stdout + "\n" + res.stderr, "CMake configuration")
             res = subprocess.run(["cmake", "--build", str(cmake_build_dir)], capture_output=True, text=True, env=clean_env)
             if res.returncode != 0:
-                raise RuntimeError(f"CMake build failed: {res.stderr}")
+                self._handle_build_failure(res.stdout + "\n" + res.stderr, "CMake build")
             res = subprocess.run(["cmake", "--install", str(cmake_build_dir)], capture_output=True, text=True, env=clean_env)
             if res.returncode != 0:
-                raise RuntimeError(f"CMake install failed: {res.stderr}")
+                self._handle_build_failure(res.stdout + "\n" + res.stderr, "CMake install")
 
         elif build_system == "make":
             res = subprocess.run(["make", "-C", str(build_dir)], capture_output=True, text=True, env=clean_env)
             if res.returncode != 0:
-                raise RuntimeError(f"Make build failed: {res.stderr}")
+                self._handle_build_failure(res.stdout + "\n" + res.stderr, "Make build")
             res = subprocess.run(["make", "-C", str(build_dir), f"DESTDIR={staging_dir}", "install"], capture_output=True, text=True, env=clean_env)
             if res.returncode != 0:
                 # Try simple copy if make install fails or no install target
@@ -305,7 +347,7 @@ class PackageInstaller:
             for step in build_info.get("steps", []):
                 res = subprocess.run(step, shell=True, cwd=str(build_dir), capture_output=True, text=True, env=clean_env)
                 if res.returncode != 0:
-                    raise RuntimeError(f"Build step failed: '{step}': {res.stderr}")
+                    self._handle_build_failure(res.stdout + "\n" + res.stderr, f"Build step '{step}'")
         else:
             # Fallback search for built binaries or source files
             pass
