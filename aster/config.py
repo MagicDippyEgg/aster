@@ -77,6 +77,82 @@ def get_clean_env() -> dict:
             del env["LD_LIBRARY_PATH"]
     return env
 
+def get_build_env(config: "AsterConfig", extra_prefix_dirs: list = None) -> dict:
+    """
+    Returns a build environment configured to search Aster-installed packages and optional
+    temporary build dependency prefixes for include headers, libraries, binaries, and cmake/pkg-config files.
+    """
+    env = get_clean_env()
+
+    prefix_dirs = []
+    if extra_prefix_dirs:
+        prefix_dirs.extend([Path(p) for p in extra_prefix_dirs])
+
+    # Scan installed package directories under config.packages_dir
+    if config and config.packages_dir.exists():
+        for pkg_dir in config.packages_dir.iterdir():
+            if pkg_dir.is_dir():
+                prefix_dirs.append(pkg_dir)
+
+    bin_paths = []
+    inc_paths = []
+    lib_paths = []
+    cmake_paths = []
+    pkgconfig_paths = []
+
+    for p in prefix_dirs:
+        # Binaries
+        b_dir = p / "bin"
+        if b_dir.exists():
+            bin_paths.append(str(b_dir))
+
+        # Include headers
+        for inc in [p / "include", p / "usr" / "include"]:
+            if inc.exists():
+                inc_paths.append(str(inc))
+
+        # Libraries
+        for lib in [p / "lib", p / "lib64", p / "usr" / "lib", p / "usr" / "lib64"]:
+            if lib.exists():
+                lib_paths.append(str(lib))
+
+        # CMake prefix
+        cmake_paths.append(str(p))
+
+        # pkg-config
+        for pc in [p / "lib" / "pkgconfig", p / "lib64" / "pkgconfig", p / "share" / "pkgconfig"]:
+            if pc.exists():
+                pkgconfig_paths.append(str(pc))
+
+    # Prepend to environment variables
+    if bin_paths:
+        current_path = env.get("PATH", "")
+        env["PATH"] = os.pathsep.join(bin_paths + [current_path] if current_path else bin_paths)
+
+    if inc_paths:
+        inc_str = os.pathsep.join(inc_paths)
+        for var in ["CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH"]:
+            curr = env.get(var, "")
+            env[var] = os.pathsep.join([inc_str, curr]) if curr else inc_str
+
+    if lib_paths:
+        lib_str = os.pathsep.join(lib_paths)
+        for var in ["LIBRARY_PATH", "LD_LIBRARY_PATH"]:
+            curr = env.get(var, "")
+            env[var] = os.pathsep.join([lib_str, curr]) if curr else lib_str
+
+    if cmake_paths:
+        cmake_str = os.pathsep.join(cmake_paths)
+        curr = env.get("CMAKE_PREFIX_PATH", "")
+        env["CMAKE_PREFIX_PATH"] = os.pathsep.join([cmake_str, curr]) if curr else cmake_str
+
+    if pkgconfig_paths:
+        pc_str = os.pathsep.join(pkgconfig_paths)
+        curr = env.get("PKG_CONFIG_PATH", "")
+        env["PKG_CONFIG_PATH"] = os.pathsep.join([pc_str, curr]) if curr else pc_str
+
+    return env
+
 class AsterConfig:
     def __init__(self, root_dir: Path = None):
         if root_dir:

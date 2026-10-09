@@ -13,7 +13,7 @@ import urllib.error
 import subprocess
 from pathlib import Path
 from typing import Dict, Any, List, Optional
-from aster.config import AsterConfig, fetch_url_to_file, get_clean_env
+from aster.config import AsterConfig, fetch_url_to_file, get_clean_env, get_build_env
 from aster.registry import RegistryManager
 from aster.catalogue import CatalogueManager
 
@@ -280,20 +280,20 @@ class PackageInstaller:
             shutil.rmtree(build_dir)
         build_dir.mkdir(parents=True, exist_ok=True)
 
-        clean_env = get_clean_env()
+        build_env = get_build_env(self.config)
 
         if src_type == "git":
             ref = source_info.get("ref", "main")
             cmd = ["git", "clone", "--depth", "1", "--branch", ref, src_url, str(build_dir)]
-            res = subprocess.run(cmd, capture_output=True, text=True, env=clean_env)
+            res = subprocess.run(cmd, capture_output=True, text=True, env=build_env)
             if res.returncode != 0:
                 # Try cloning default branch if branch fails
                 cmd = ["git", "clone", "--depth", "1", src_url, str(build_dir)]
-                res = subprocess.run(cmd, capture_output=True, text=True, env=clean_env)
+                res = subprocess.run(cmd, capture_output=True, text=True, env=build_env)
                 if res.returncode != 0:
                     raise RuntimeError(f"Git clone failed for '{pkg_id}': {res.stderr}")
-        elif src_type in ("tar.gz", "archive", "url"):
-            dest_archive = self.config.downloads_cache / f"{pkg_id}.tar.gz"
+        elif src_type in ("tar.gz", "zip", "archive", "url"):
+            dest_archive = self.config.downloads_cache / (f"{pkg_id}.zip" if src_type == "zip" or src_url.endswith(".zip") else f"{pkg_id}.tar.gz")
             if src_url.startswith("http://") or src_url.startswith("https://"):
                 fetch_url_to_file(src_url, dest_archive, timeout=30)
             elif src_url.startswith("file://"):
@@ -301,13 +301,29 @@ class PackageInstaller:
             else:
                 shutil.copy(Path(src_url), dest_archive)
 
-            with tarfile.open(dest_archive, "r:*") as tar:
-                for member in tar.getmembers():
-                    if member.name.startswith("/") or ".." in member.name:
-                        raise RuntimeError(f"Unsafe file path in archive: {member.name}")
-                tar.extractall(path=build_dir)
+            if str(dest_archive).endswith(".zip") or src_type == "zip":
+                with zipfile.ZipFile(dest_archive, "r") as zip_ref:
+                    for name in zip_ref.namelist():
+                        if name.startswith("/") or ".." in name:
+                            raise RuntimeError(f"Unsafe file path in archive: {name}")
+                    zip_ref.extractall(path=build_dir)
+            else:
+                with tarfile.open(dest_archive, "r:*") as tar:
+                    for member in tar.getmembers():
+                        if member.name.startswith("/") or ".." in member.name:
+                            raise RuntimeError(f"Unsafe file path in archive: {member.name}")
+                    tar.extractall(path=build_dir)
         else:
             raise RuntimeError(f"Unsupported source type '{src_type}' for package '{pkg_id}'.")
+
+        # If single top-level directory extracted, un-nest build_dir
+        extracted_items = [p for p in build_dir.iterdir() if p.name not in (".git",)]
+        if len(extracted_items) == 1 and extracted_items[0].is_dir():
+            nested_dir = extracted_items[0]
+            if not (build_dir / "CMakeLists.txt").exists() and not (build_dir / "Makefile").exists():
+                for item in nested_dir.iterdir():
+                    shutil.move(str(item), str(build_dir / item.name))
+                shutil.rmtree(str(nested_dir))
 
         # Build steps
         build_info = pkg_def.get("build", {})
@@ -323,29 +339,29 @@ class PackageInstaller:
             cmake_build_dir.mkdir(exist_ok=True)
             res = subprocess.run(
                 ["cmake", "-B", str(cmake_build_dir), "-S", str(build_dir), f"-DCMAKE_INSTALL_PREFIX={staging_dir}"],
-                capture_output=True, text=True, env=clean_env
+                capture_output=True, text=True, env=build_env
             )
             if res.returncode != 0:
                 self._handle_build_failure(res.stdout + "\n" + res.stderr, "CMake configuration")
-            res = subprocess.run(["cmake", "--build", str(cmake_build_dir)], capture_output=True, text=True, env=clean_env)
+            res = subprocess.run(["cmake", "--build", str(cmake_build_dir)], capture_output=True, text=True, env=build_env)
             if res.returncode != 0:
                 self._handle_build_failure(res.stdout + "\n" + res.stderr, "CMake build")
-            res = subprocess.run(["cmake", "--install", str(cmake_build_dir)], capture_output=True, text=True, env=clean_env)
+            res = subprocess.run(["cmake", "--install", str(cmake_build_dir)], capture_output=True, text=True, env=build_env)
             if res.returncode != 0:
                 self._handle_build_failure(res.stdout + "\n" + res.stderr, "CMake install")
 
         elif build_system == "make":
-            res = subprocess.run(["make", "-C", str(build_dir)], capture_output=True, text=True, env=clean_env)
+            res = subprocess.run(["make", "-C", str(build_dir)], capture_output=True, text=True, env=build_env)
             if res.returncode != 0:
                 self._handle_build_failure(res.stdout + "\n" + res.stderr, "Make build")
-            res = subprocess.run(["make", "-C", str(build_dir), f"DESTDIR={staging_dir}", "install"], capture_output=True, text=True, env=clean_env)
+            res = subprocess.run(["make", "-C", str(build_dir), f"DESTDIR={staging_dir}", "install"], capture_output=True, text=True, env=build_env)
             if res.returncode != 0:
                 # Try simple copy if make install fails or no install target
                 pass
 
         elif build_info.get("steps"):
             for step in build_info.get("steps", []):
-                res = subprocess.run(step, shell=True, cwd=str(build_dir), capture_output=True, text=True, env=clean_env)
+                res = subprocess.run(step, shell=True, cwd=str(build_dir), capture_output=True, text=True, env=build_env)
                 if res.returncode != 0:
                     self._handle_build_failure(res.stdout + "\n" + res.stderr, f"Build step '{step}'")
         else:
