@@ -42,10 +42,15 @@ class DependencyResolver:
                 build_deps = pkg_def["build"].get("dependencies", [])
                 if isinstance(build_deps, list):
                     deps.extend(build_deps)
+            elif "build_dependencies" in pkg_def and isinstance(pkg_def["build_dependencies"], list):
+                deps.extend(pkg_def["build_dependencies"])
+
             if "runtime" in pkg_def and isinstance(pkg_def["runtime"], dict):
                 rt_deps = pkg_def["runtime"].get("dependencies", [])
                 if isinstance(rt_deps, list):
                     deps.extend(rt_deps)
+            elif "runtime_dependencies" in pkg_def and isinstance(pkg_def["runtime_dependencies"], list):
+                deps.extend(pkg_def["runtime_dependencies"])
 
             for dep in deps:
                 if isinstance(dep, str):
