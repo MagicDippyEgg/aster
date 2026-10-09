@@ -56,6 +56,27 @@ def fetch_url_to_file(url: str, dest_path: Path, headers: dict = None, timeout: 
     with open(dest_path, "wb") as f:
         f.write(data)
 
+def get_clean_env() -> dict:
+    """
+    Returns a copy of os.environ with PyInstaller-injected library paths removed.
+    This prevents subprocesses (like git, cmake, gcc) from failing due to OpenSSL/glibc
+    version mismatches caused by PyInstaller's bundled shared libraries in LD_LIBRARY_PATH.
+    """
+    env = os.environ.copy()
+    # Remove PyInstaller's injected LD_LIBRARY_PATH if present
+    if "LD_LIBRARY_PATH_ORIG" in env:
+        env["LD_LIBRARY_PATH"] = env["LD_LIBRARY_PATH_ORIG"]
+        del env["LD_LIBRARY_PATH_ORIG"]
+    elif "LD_LIBRARY_PATH" in env:
+        # Check if LD_LIBRARY_PATH contains PyInstaller's _MEI temporary directory
+        ld_paths = env["LD_LIBRARY_PATH"].split(os.pathsep)
+        cleaned = [p for p in ld_paths if "_MEI" not in p]
+        if cleaned:
+            env["LD_LIBRARY_PATH"] = os.pathsep.join(cleaned)
+        else:
+            del env["LD_LIBRARY_PATH"]
+    return env
+
 class AsterConfig:
     def __init__(self, root_dir: Path = None):
         if root_dir:

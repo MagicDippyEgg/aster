@@ -13,7 +13,7 @@ import urllib.error
 import subprocess
 from pathlib import Path
 from typing import Dict, Any, List, Optional
-from aster.config import AsterConfig, fetch_url_to_file
+from aster.config import AsterConfig, fetch_url_to_file, get_clean_env
 from aster.registry import RegistryManager
 from aster.catalogue import CatalogueManager
 
@@ -238,14 +238,16 @@ class PackageInstaller:
             shutil.rmtree(build_dir)
         build_dir.mkdir(parents=True, exist_ok=True)
 
+        clean_env = get_clean_env()
+
         if src_type == "git":
             ref = source_info.get("ref", "main")
             cmd = ["git", "clone", "--depth", "1", "--branch", ref, src_url, str(build_dir)]
-            res = subprocess.run(cmd, capture_output=True, text=True)
+            res = subprocess.run(cmd, capture_output=True, text=True, env=clean_env)
             if res.returncode != 0:
                 # Try cloning default branch if branch fails
                 cmd = ["git", "clone", "--depth", "1", src_url, str(build_dir)]
-                res = subprocess.run(cmd, capture_output=True, text=True)
+                res = subprocess.run(cmd, capture_output=True, text=True, env=clean_env)
                 if res.returncode != 0:
                     raise RuntimeError(f"Git clone failed for '{pkg_id}': {res.stderr}")
         elif src_type in ("tar.gz", "archive", "url"):
@@ -279,29 +281,29 @@ class PackageInstaller:
             cmake_build_dir.mkdir(exist_ok=True)
             res = subprocess.run(
                 ["cmake", "-B", str(cmake_build_dir), "-S", str(build_dir), f"-DCMAKE_INSTALL_PREFIX={staging_dir}"],
-                capture_output=True, text=True
+                capture_output=True, text=True, env=clean_env
             )
             if res.returncode != 0:
                 raise RuntimeError(f"CMake configuration failed: {res.stderr}")
-            res = subprocess.run(["cmake", "--build", str(cmake_build_dir)], capture_output=True, text=True)
+            res = subprocess.run(["cmake", "--build", str(cmake_build_dir)], capture_output=True, text=True, env=clean_env)
             if res.returncode != 0:
                 raise RuntimeError(f"CMake build failed: {res.stderr}")
-            res = subprocess.run(["cmake", "--install", str(cmake_build_dir)], capture_output=True, text=True)
+            res = subprocess.run(["cmake", "--install", str(cmake_build_dir)], capture_output=True, text=True, env=clean_env)
             if res.returncode != 0:
                 raise RuntimeError(f"CMake install failed: {res.stderr}")
 
         elif build_system == "make":
-            res = subprocess.run(["make", "-C", str(build_dir)], capture_output=True, text=True)
+            res = subprocess.run(["make", "-C", str(build_dir)], capture_output=True, text=True, env=clean_env)
             if res.returncode != 0:
                 raise RuntimeError(f"Make build failed: {res.stderr}")
-            res = subprocess.run(["make", "-C", str(build_dir), f"DESTDIR={staging_dir}", "install"], capture_output=True, text=True)
+            res = subprocess.run(["make", "-C", str(build_dir), f"DESTDIR={staging_dir}", "install"], capture_output=True, text=True, env=clean_env)
             if res.returncode != 0:
                 # Try simple copy if make install fails or no install target
                 pass
 
         elif build_info.get("steps"):
             for step in build_info.get("steps", []):
-                res = subprocess.run(step, shell=True, cwd=str(build_dir), capture_output=True, text=True)
+                res = subprocess.run(step, shell=True, cwd=str(build_dir), capture_output=True, text=True, env=clean_env)
                 if res.returncode != 0:
                     raise RuntimeError(f"Build step failed: '{step}': {res.stderr}")
         else:
