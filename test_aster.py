@@ -112,6 +112,39 @@ def temp_aster_env(monkeypatch):
         with open(pkgs_dir / "test-src.json", "w") as f:
             json.dump(test_src_def, f)
 
+        # Nested binary archive fixture e.g. ripgrep-bin
+        ripgrep_bin_dir = tmp_path / "ripgrep_asset"
+        ripgrep_bin_dir.mkdir()
+        ripgrep_exe = ripgrep_bin_dir / "rg"
+        ripgrep_exe.write_text("#!/bin/sh\necho rg")
+        ripgrep_exe.chmod(0o755)
+
+        ripgrep_archive = tmp_path / "ripgrep-14.1.0-x86_64-linux.tar.gz"
+        with tarfile.open(ripgrep_archive, "w:gz") as tar:
+            # Add file under top-level folder e.g. ripgrep-14.1.0-x86_64/rg
+            tar.add(ripgrep_exe, arcname="ripgrep-14.1.0-x86_64/rg")
+
+        ripgrep_bin_def = {
+            "schema_version": 1,
+            "id": "ripgrep-bin",
+            "name": "ripgrep",
+            "version": "14.1.0",
+            "type": "binary",
+            "description": "line-oriented search tool",
+            "downloads": {
+                "linux-x86_64": {"url": f"file://{ripgrep_archive}"},
+                "linux-aarch64": {"url": f"file://{ripgrep_archive}"}
+            }
+        }
+        with open(pkgs_dir / "ripgrep-bin.json", "w") as f:
+            json.dump(ripgrep_bin_def, f)
+
+        index_data["packages"]["ripgrep-bin"] = {
+            "definition": "packages/ripgrep-bin.json",
+            "type": "binary",
+            "description": "line-oriented search tool"
+        }
+
         # Custom steps package fixture e.g. htop-src
         htop_src_def = {
             "schema_version": 1,
@@ -308,3 +341,10 @@ def test_install_custom_steps_package(temp_aster_env):
     assert main(["install", "htop-src", "-y"]) == 0
     assert (config.bin_dir / "htop").exists()
     assert main(["remove", "htop-src"]) == 0
+
+def test_install_nested_binary_package(temp_aster_env):
+    config = temp_aster_env
+    assert main(["repo", "update"]) == 0
+    assert main(["install", "ripgrep-bin"]) == 0
+    assert (config.bin_dir / "rg").exists()
+    assert main(["remove", "ripgrep-bin"]) == 0

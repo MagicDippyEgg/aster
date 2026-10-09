@@ -199,6 +199,14 @@ class PackageInstaller:
             shutil.copy(dest_archive, dest_file)
             dest_file.chmod(0o755)
 
+        # Un-nest single top-level directory if archive extracted into a nested directory e.g. ripgrep-14.1.0-x86_64-unknown-linux-musl/
+        extracted_items = [p for p in staging_dir.iterdir()]
+        if len(extracted_items) == 1 and extracted_items[0].is_dir():
+            nested_dir = extracted_items[0]
+            for item in nested_dir.iterdir():
+                shutil.move(str(item), str(staging_dir / item.name))
+            shutil.rmtree(str(nested_dir))
+
         # Locate binaries in staging
         extracted_bin_dir = staging_dir / "bin"
         if not extracted_bin_dir.exists():
