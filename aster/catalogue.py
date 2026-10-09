@@ -59,6 +59,13 @@ class CatalogueManager:
 
         validate_index(data)
         self.config.save_json_atomic(cached_index_file, data)
+
+        # Clear cached package definition files for this repository so new definitions are retrieved
+        pkgs_cache_dir = cache_dir / "packages"
+        if pkgs_cache_dir.exists():
+            import shutil
+            shutil.rmtree(pkgs_cache_dir)
+
         return data
 
     def update_all(self):
