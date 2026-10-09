@@ -46,12 +46,36 @@ def create_parser() -> argparse.ArgumentParser:
     # aster remove <package>
     remove_parser = subparsers.add_parser("remove", help="Remove an installed package")
     remove_parser.add_argument("package", help="Package ID")
+    remove_parser.add_argument("--force", action="store_true", help="Force removal ignoring dependencies")
+
+    # aster clean
+    subparsers.add_parser("clean", help="Clear temporary build and download caches")
+
+    # aster doctor
+    subparsers.add_parser("doctor", help="Diagnose installation, path, and tool issues")
+
+    # aster history
+    subparsers.add_parser("history", help="Show history log of package operations")
+
+    # aster update
+    subparsers.add_parser("update", help="Refresh package indexes and show available updates")
+
+    # aster upgrade
+    upgrade_parser = subparsers.add_parser("upgrade", help="Upgrade installed packages")
+    upgrade_parser.add_argument("package", nargs="?", default="", help="Optional package ID to upgrade")
 
     # aster repo <subcommand>
     repo_parser = subparsers.add_parser("repo", help="Manage package repositories")
     repo_subparsers = repo_parser.add_subparsers(dest="repo_command")
     repo_subparsers.add_parser("list", help="List configured repositories")
     repo_subparsers.add_parser("update", help="Update cached package indexes")
+
+    repo_add = repo_subparsers.add_parser("add", help="Add a package repository")
+    repo_add.add_argument("name", help="Repository name")
+    repo_add.add_argument("url", help="Repository URL or path")
+
+    repo_remove = repo_subparsers.add_parser("remove", help="Remove a package repository")
+    repo_remove.add_argument("name", help="Repository name")
 
     return parser
 
@@ -133,16 +157,158 @@ def main(args: Optional[List[str]] = None) -> int:
 
         elif parsed_args.command == "remove":
             pkg_id = parsed_args.package
-            installer.remove(pkg_id)
+            force = getattr(parsed_args, "force", False)
+            installer.remove(pkg_id, force=force)
+            return 0
+
+        elif parsed_args.command == "clean":
+            import shutil
+            downloads = config.downloads_cache
+            archives = config.archives_cache
+            build = config.build_dir
+            cleaned_size = 0
+            for path in [downloads, archives, build]:
+                if path.exists():
+                    for item in path.iterdir():
+                        if item.is_file():
+                            cleaned_size += item.stat().st_size
+                            item.unlink()
+                        elif item.is_dir():
+                            shutil.rmtree(item)
+            print("Successfully cleared build and download caches.")
+            return 0
+
+        elif parsed_args.command == "doctor":
+            import os, shutil
+            print("Aster Doctor - Diagnostic Check")
+            print("=" * 40)
+            print(f"Aster Home: {config.root_dir}")
+
+            # Check PATH
+            path_env = os.environ.get("PATH", "")
+            aster_bin_str = str(config.bin_dir)
+            aster_home_bin_str = str(config.root_dir)
+
+            bin_in_path = aster_bin_str in path_env
+            home_bin_in_path = aster_home_bin_str in path_env
+
+            print(f"Directory {config.bin_dir} in PATH: {'YES' if bin_in_path else 'NO'}")
+            if not bin_in_path:
+                print(f"  Warning: Add '{config.bin_dir}' to your PATH to run installed commands.")
+
+            print(f"Directory {config.root_dir} in PATH: {'YES' if home_bin_in_path else 'NO'}")
+            if not home_bin_in_path:
+                print(f"  Warning: Add '{config.root_dir}' to your PATH to run 'aster' executable.")
+
+            # System tools check
+            tools = ["git", "cmake", "make", "gcc", "tar", "unzip"]
+            print("\nBuild Tools Availability:")
+            for tool in tools:
+                found = shutil.which(tool)
+                print(f"  {tool:<10}: {'FOUND (' + found + ')' if found else 'NOT FOUND'}")
+
+            return 0
+
+        elif parsed_args.command == "history":
+            history_file = config.logs_dir / "history.log"
+            if not history_file.exists():
+                print("No history recorded yet.")
+            else:
+                with open(history_file, "r", encoding="utf-8") as f:
+                    print(f.read())
+            return 0
+
+        elif parsed_args.command == "update":
+            print("Refreshing package indexes...")
+            catalogue.update_all()
+            installed = registry.list_installed()
+            updates_found = []
+            from aster.version import compare_versions
+            for pkg_id, inst_info in installed.items():
+                pkg_def = catalogue.get_package_definition(pkg_id)
+                if pkg_def:
+                    avail_ver = pkg_def.get("version", "")
+                    inst_ver = inst_info.get("version", "")
+                    if compare_versions(inst_ver, avail_ver) < 0:
+                        updates_found.append((pkg_id, inst_ver, avail_ver))
+
+            if updates_found:
+                print("\nAvailable package updates:")
+                print(f"{'PACKAGE ID':<20} {'INSTALLED':<15} {'AVAILABLE'}")
+                print("-" * 50)
+                for pkg_id, inst_v, avail_v in updates_found:
+                    print(f"{pkg_id:<20} {inst_v:<15} {avail_v}")
+                print("\nRun 'aster upgrade' to upgrade all packages.")
+            else:
+                print("All installed packages are up to date.")
+            return 0
+
+        elif parsed_args.command == "upgrade":
+            target_pkg = parsed_args.package
+            catalogue.update_all()
+            from aster.version import compare_versions
+
+            if target_pkg:
+                if not registry.is_installed(target_pkg):
+                    print(f"Package '{target_pkg}' is not installed.")
+                    return 1
+                inst_info = registry.get_installed_package(target_pkg)
+                pkg_def = catalogue.get_package_definition(target_pkg)
+                if not pkg_def:
+                    print(f"No definition found for '{target_pkg}' in catalogue.")
+                    return 1
+                inst_ver = inst_info.get("version", "")
+                avail_ver = pkg_def.get("version", "")
+                if compare_versions(inst_ver, avail_ver) < 0:
+                    print(f"Upgrading '{target_pkg}' from {inst_ver} to {avail_ver}...")
+                    installer.remove(target_pkg)
+                    installer.install(target_pkg)
+                else:
+                    print(f"Package '{target_pkg}' is already at latest version ({inst_ver}).")
+            else:
+                installed = registry.list_installed()
+                upgraded_any = False
+                for pkg_id, inst_info in list(installed.items()):
+                    pkg_def = catalogue.get_package_definition(pkg_id)
+                    if pkg_def:
+                        inst_ver = inst_info.get("version", "")
+                        avail_ver = pkg_def.get("version", "")
+                        if compare_versions(inst_ver, avail_ver) < 0:
+                            print(f"Upgrading '{pkg_id}' from {inst_ver} to {avail_ver}...")
+                            installer.remove(pkg_id)
+                            installer.install(pkg_id)
+                            upgraded_any = True
+                if not upgraded_any:
+                    print("All packages are already up to date.")
             return 0
 
         elif parsed_args.command == "repo":
+            repos_data = config.load_json(config.repositories_json)
+            repos = repos_data.get("repositories", {})
+
             if parsed_args.repo_command == "list":
-                repos = catalogue.get_repositories()
                 print(f"{'NAME':<15} {'URL'}")
                 print("-" * 50)
                 for name, info in repos.items():
                     print(f"{name:<15} {info.get('url')}")
+                return 0
+            elif parsed_args.repo_command == "add":
+                r_name = parsed_args.name
+                r_url = parsed_args.url
+                repos[r_name] = {"name": r_name, "url": r_url}
+                repos_data["repositories"] = repos
+                config.save_json_atomic(config.repositories_json, repos_data)
+                print(f"Repository '{r_name}' added successfully.")
+                return 0
+            elif parsed_args.repo_command == "remove":
+                r_name = parsed_args.name
+                if r_name in repos:
+                    del repos[r_name]
+                    repos_data["repositories"] = repos
+                    config.save_json_atomic(config.repositories_json, repos_data)
+                    print(f"Repository '{r_name}' removed successfully.")
+                else:
+                    print(f"Repository '{r_name}' not found.")
                 return 0
             elif parsed_args.repo_command == "update":
                 print("Updating package catalogue indexes...")

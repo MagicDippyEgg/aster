@@ -36,23 +36,33 @@ class PackageInstaller:
         self.catalogue = catalogue
 
     def install(self, package_id: str) -> None:
-        """Installs a package by ID."""
-        if self.registry.is_installed(package_id):
-            installed_pkg = self.registry.get_installed_package(package_id)
-            print(f"Package '{package_id}' is already installed (version {installed_pkg.get('version')}).")
-            return
+        """Installs a package and its dependencies by ID."""
+        from aster.resolver import DependencyResolver, DependencyError
+        resolver = DependencyResolver(self.catalogue, self.registry)
 
-        pkg_def = self.catalogue.get_package_definition(package_id)
-        if not pkg_def:
-            raise ValueError(f"Package definition for '{package_id}' not found in catalogue.")
+        try:
+            install_plan = resolver.resolve_dependencies(package_id)
+        except DependencyError as e:
+            raise RuntimeError(f"Dependency resolution failed: {e}")
 
-        pkg_type = pkg_def.get("type")
-        if pkg_type == "binary":
-            self._install_binary(pkg_def)
-        elif pkg_type == "source":
-            self._install_source(pkg_def)
-        else:
-            raise ValueError(f"Unsupported package type '{pkg_type}' for package '{package_id}'.")
+        for pkg_to_install in install_plan:
+            if self.registry.is_installed(pkg_to_install):
+                if pkg_to_install == package_id:
+                    installed_pkg = self.registry.get_installed_package(package_id)
+                    print(f"Package '{package_id}' is already installed (version {installed_pkg.get('version')}).")
+                continue
+
+            pkg_def = self.catalogue.get_package_definition(pkg_to_install)
+            if not pkg_def:
+                raise ValueError(f"Package definition for '{pkg_to_install}' not found in catalogue.")
+
+            pkg_type = pkg_def.get("type")
+            if pkg_type == "binary":
+                self._install_binary(pkg_def)
+            elif pkg_type == "source":
+                self._install_source(pkg_def)
+            else:
+                raise ValueError(f"Unsupported package type '{pkg_type}' for package '{pkg_to_install}'.")
 
     def _check_binary_conflicts(self, provided_binaries: List[str], current_package_id: str):
         """Checks if provided binary links conflict with existing commands in bin_dir."""
@@ -367,11 +377,20 @@ class PackageInstaller:
         )
         print(f"Successfully compiled and installed '{pkg_id}' version {version}.")
 
-    def remove(self, package_id: str) -> None:
+    def remove(self, package_id: str, force: bool = False) -> None:
         """Removes an installed package."""
         if not self.registry.is_installed(package_id):
             print(f"Package '{package_id}' is not installed.")
             return
+
+        if not force:
+            from aster.resolver import DependencyResolver
+            resolver = DependencyResolver(self.catalogue, self.registry)
+            dependents = resolver.check_removal_safety(package_id)
+            if dependents:
+                raise RuntimeError(
+                    f"Cannot remove '{package_id}': required by installed package(s): {', '.join(dependents)}"
+                )
 
         pkg_info = self.registry.get_installed_package(package_id)
         provided_binaries = pkg_info.get("provided_binaries", [])
