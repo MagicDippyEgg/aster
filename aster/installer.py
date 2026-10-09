@@ -35,7 +35,7 @@ class PackageInstaller:
         self.registry = registry
         self.catalogue = catalogue
 
-    def install(self, package_id: str) -> None:
+    def install(self, package_id: str, auto_yes: bool = False) -> None:
         """Installs a package and its dependencies by ID."""
         from aster.resolver import DependencyResolver, DependencyError
         resolver = DependencyResolver(self.catalogue, self.registry)
@@ -60,7 +60,7 @@ class PackageInstaller:
             if pkg_type == "binary":
                 self._install_binary(pkg_def)
             elif pkg_type == "source":
-                self._install_source(pkg_def)
+                self._install_source(pkg_def, auto_yes=auto_yes)
             else:
                 raise ValueError(f"Unsupported package type '{pkg_type}' for package '{pkg_to_install}'.")
 
@@ -265,7 +265,7 @@ class PackageInstaller:
         )
         print(f"Successfully installed '{pkg_id}' version {version}.")
 
-    def _install_source(self, pkg_def: dict) -> None:
+    def _install_source(self, pkg_def: dict, auto_yes: bool = False) -> None:
         pkg_id = pkg_def["id"]
         version = pkg_def.get("version", "unknown")
         name = pkg_def.get("name", pkg_id)
@@ -360,7 +360,26 @@ class PackageInstaller:
                 pass
 
         elif build_info.get("steps"):
-            for step in build_info.get("steps", []):
+            steps = build_info.get("steps", [])
+            print(f"\nPackage '{pkg_id}' defines custom build steps:")
+            for idx, step in enumerate(steps, 1):
+                print(f"  {idx}. {step}")
+
+            if not auto_yes:
+                try:
+                    response = input("\nDo you want to execute these build steps? [y/N]: ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    response = "n"
+                if response not in ("y", "yes"):
+                    print("Installation cancelled by user.")
+                    if build_dir.exists():
+                        shutil.rmtree(build_dir)
+                    if staging_dir.exists():
+                        shutil.rmtree(staging_dir)
+                    return
+
+            for step in steps:
+                print(f"Executing step: {step}")
                 res = subprocess.run(step, shell=True, cwd=str(build_dir), capture_output=True, text=True, env=build_env)
                 if res.returncode != 0:
                     self._handle_build_failure(res.stdout + "\n" + res.stderr, f"Build step '{step}'")

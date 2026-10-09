@@ -42,6 +42,7 @@ def create_parser() -> argparse.ArgumentParser:
     # aster install <package>
     install_parser = subparsers.add_parser("install", help="Install a package")
     install_parser.add_argument("package", help="Package ID")
+    install_parser.add_argument("-y", "--yes", action="store_true", help="Automatically confirm custom build steps and prompts")
 
     # aster remove <package>
     remove_parser = subparsers.add_parser("remove", help="Remove an installed package")
@@ -152,7 +153,8 @@ def main(args: Optional[List[str]] = None) -> int:
 
         elif parsed_args.command == "install":
             pkg_id = parsed_args.package
-            installer.install(pkg_id)
+            auto_yes = getattr(parsed_args, "yes", False)
+            installer.install(pkg_id, auto_yes=auto_yes)
             return 0
 
         elif parsed_args.command == "remove":

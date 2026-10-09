@@ -112,6 +112,37 @@ def temp_aster_env(monkeypatch):
         with open(pkgs_dir / "test-src.json", "w") as f:
             json.dump(test_src_def, f)
 
+        # Custom steps package fixture e.g. htop-src
+        htop_src_def = {
+            "schema_version": 1,
+            "id": "htop-src",
+            "name": "htop",
+            "version": "3.5.3",
+            "type": "source",
+            "description": "Interactive process viewer",
+            "source": {
+                "type": "tar.gz",
+                "url": f"file://{src_archive}"
+            },
+            "build": {
+                "steps": [
+                    "mkdir -p staging_bin",
+                    "echo '#!/bin/sh' > staging_bin/htop",
+                    "chmod +x staging_bin/htop"
+                ]
+            }
+        }
+        with open(pkgs_dir / "htop-src.json", "w") as f:
+            json.dump(htop_src_def, f)
+
+        index_data["packages"]["htop-src"] = {
+            "definition": "packages/htop-src.json",
+            "type": "source",
+            "description": "Interactive process viewer"
+        }
+        with open(cat_dir / "index.json", "w") as f:
+            json.dump(index_data, f)
+
         # Dependency packages
         dep_lib_exe = bin_asset_dir / "dep-lib"
         dep_lib_exe.write_text("#!/bin/sh\necho dep-lib")
@@ -269,3 +300,11 @@ def test_install_with_dependencies(temp_aster_env):
 
     # Force removal succeeds
     assert main(["remove", "dep-lib", "--force"]) == 0
+
+def test_install_custom_steps_package(temp_aster_env):
+    config = temp_aster_env
+    assert main(["repo", "update"]) == 0
+    # Test installation with -y auto confirmation
+    assert main(["install", "htop-src", "-y"]) == 0
+    assert (config.bin_dir / "htop").exists()
+    assert main(["remove", "htop-src"]) == 0
