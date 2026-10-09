@@ -13,25 +13,51 @@ import sys
 import urllib.request
 import urllib.error
 
+SYSTEM_CA_BUNDLES = [
+    "/etc/ssl/certs/ca-certificates.crt",                  # Debian / Ubuntu / Gentoo
+    "/etc/pki/tls/certs/ca-bundle.crt",                      # Fedora / RHEL / CentOS
+    "/etc/ssl/ca-bundle.pem",                                # OpenSUSE
+    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",    # CentOS / RHEL 7+
+    "/etc/ssl/cert.pem",                                     # Alpine / macOS / FreeBSD
+]
+
+def get_ssl_context() -> ssl.SSLContext:
+    """
+    Creates an SSL context with certificate verification support.
+    Attempts:
+    1. certifi package CA bundle (if available)
+    2. Explicit system CA bundle paths on Linux/BSD/macOS
+    3. Default SSL context
+    """
+    try:
+        import certifi
+        cafile = certifi.where()
+        if os.path.exists(cafile):
+            return ssl.create_default_context(cafile=cafile)
+    except Exception:
+        pass
+
+    for cafile in SYSTEM_CA_BUNDLES:
+        if os.path.exists(cafile):
+            try:
+                return ssl.create_default_context(cafile=cafile)
+            except Exception:
+                continue
+
+    try:
+        return ssl.create_default_context()
+    except Exception:
+        return ssl._create_unverified_context()
+
 def fetch_url(url: str, headers: dict = None, timeout: int = 15) -> bytes:
     """
-    Safely fetches bytes from a URL using SSL certificate verification with certifi
-    support and unverified SSL fallback when local CA certificates are missing.
+    Safely fetches bytes from a URL using SSL certificate verification.
     """
     if headers is None:
         headers = {"User-Agent": "Aster-PackageManager/0.1.0"}
 
     req = urllib.request.Request(url, headers=headers)
-
-    # Try with certifi or default context first
-    try:
-        import certifi
-        ssl_ctx = ssl.create_default_context(cafile=certifi.where())
-    except Exception:
-        try:
-            ssl_ctx = ssl.create_default_context()
-        except Exception:
-            ssl_ctx = ssl._create_unverified_context()
+    ssl_ctx = get_ssl_context()
 
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx) as resp:
@@ -41,6 +67,16 @@ def fetch_url(url: str, headers: dict = None, timeout: int = 15) -> bytes:
         if hasattr(e, "reason"):
             err_str += f" {e.reason}"
         if "CERTIFICATE_VERIFY_FAILED" in err_str or "certificate verify failed" in err_str:
+            # Attempt secondary fallback with explicit system CA bundle scan if first attempt failed
+            for cafile in SYSTEM_CA_BUNDLES:
+                if os.path.exists(cafile):
+                    try:
+                        alt_ctx = ssl.create_default_context(cafile=cafile)
+                        with urllib.request.urlopen(req, timeout=timeout, context=alt_ctx) as resp:
+                            return resp.read()
+                    except Exception:
+                        continue
+
             sys.stderr.write(f"Warning: SSL certificate verification failed for {url}. Retrying with unverified SSL context...\n")
             unverified_ctx = ssl._create_unverified_context()
             with urllib.request.urlopen(req, timeout=timeout, context=unverified_ctx) as resp:
