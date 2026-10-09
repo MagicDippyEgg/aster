@@ -328,39 +328,14 @@ class PackageInstaller:
         # Build steps
         build_info = pkg_def.get("build", {})
         build_system = build_info.get("system")
+        build_steps = build_info.get("steps")
         staging_dir = self.config.build_dir / f"staging-{pkg_id}"
         if staging_dir.exists():
             shutil.rmtree(staging_dir)
         staging_dir.mkdir(parents=True, exist_ok=True)
 
-        print(f"Building {pkg_id} ({build_system or 'custom'})...")
-        if build_system == "cmake":
-            cmake_build_dir = build_dir / "build_output"
-            cmake_build_dir.mkdir(exist_ok=True)
-            res = subprocess.run(
-                ["cmake", "-B", str(cmake_build_dir), "-S", str(build_dir), f"-DCMAKE_INSTALL_PREFIX={staging_dir}"],
-                capture_output=True, text=True, env=build_env
-            )
-            if res.returncode != 0:
-                self._handle_build_failure(res.stdout + "\n" + res.stderr, "CMake configuration")
-            res = subprocess.run(["cmake", "--build", str(cmake_build_dir)], capture_output=True, text=True, env=build_env)
-            if res.returncode != 0:
-                self._handle_build_failure(res.stdout + "\n" + res.stderr, "CMake build")
-            res = subprocess.run(["cmake", "--install", str(cmake_build_dir)], capture_output=True, text=True, env=build_env)
-            if res.returncode != 0:
-                self._handle_build_failure(res.stdout + "\n" + res.stderr, "CMake install")
-
-        elif build_system == "make":
-            res = subprocess.run(["make", "-C", str(build_dir)], capture_output=True, text=True, env=build_env)
-            if res.returncode != 0:
-                self._handle_build_failure(res.stdout + "\n" + res.stderr, "Make build")
-            res = subprocess.run(["make", "-C", str(build_dir), f"DESTDIR={staging_dir}", "install"], capture_output=True, text=True, env=build_env)
-            if res.returncode != 0:
-                # Try simple copy if make install fails or no install target
-                pass
-
-        elif build_info.get("steps"):
-            steps = build_info.get("steps", [])
+        if build_steps:
+            steps = build_steps
             print(f"\nPackage '{pkg_id}' defines custom build steps:")
             for idx, step in enumerate(steps, 1):
                 print(f"  {idx}. {step}")
@@ -383,6 +358,34 @@ class PackageInstaller:
                 res = subprocess.run(step, shell=True, cwd=str(build_dir), capture_output=True, text=True, env=build_env)
                 if res.returncode != 0:
                     self._handle_build_failure(res.stdout + "\n" + res.stderr, f"Build step '{step}'")
+
+        elif build_system == "cmake":
+            print(f"Building {pkg_id} (cmake)...")
+            cmake_build_dir = build_dir / "build_output"
+            cmake_build_dir.mkdir(exist_ok=True)
+            res = subprocess.run(
+                ["cmake", "-B", str(cmake_build_dir), "-S", str(build_dir), f"-DCMAKE_INSTALL_PREFIX={staging_dir}"],
+                capture_output=True, text=True, env=build_env
+            )
+            if res.returncode != 0:
+                self._handle_build_failure(res.stdout + "\n" + res.stderr, "CMake configuration")
+            res = subprocess.run(["cmake", "--build", str(cmake_build_dir)], capture_output=True, text=True, env=build_env)
+            if res.returncode != 0:
+                self._handle_build_failure(res.stdout + "\n" + res.stderr, "CMake build")
+            res = subprocess.run(["cmake", "--install", str(cmake_build_dir)], capture_output=True, text=True, env=build_env)
+            if res.returncode != 0:
+                self._handle_build_failure(res.stdout + "\n" + res.stderr, "CMake install")
+
+        elif build_system == "make":
+            print(f"Building {pkg_id} (make)...")
+            res = subprocess.run(["make", "-C", str(build_dir)], capture_output=True, text=True, env=build_env)
+            if res.returncode != 0:
+                self._handle_build_failure(res.stdout + "\n" + res.stderr, "Make build")
+            res = subprocess.run(["make", "-C", str(build_dir), f"DESTDIR={staging_dir}", "install"], capture_output=True, text=True, env=build_env)
+            if res.returncode != 0:
+                # Try simple copy if make install fails or no install target
+                pass
+
         else:
             # Fallback search for built binaries or source files
             pass
