@@ -348,3 +348,128 @@ def test_install_nested_binary_package(temp_aster_env):
     assert main(["install", "ripgrep-bin"]) == 0
     assert (config.bin_dir / "rg").exists()
     assert main(["remove", "ripgrep-bin"]) == 0
+
+def test_missing_declared_executable_validation(temp_aster_env, monkeypatch, tmp_path):
+    config = temp_aster_env
+    registry = RegistryManager(config)
+    catalogue = CatalogueManager(config)
+    installer = PackageInstaller(config, registry, catalogue)
+
+    dummy_tar = tmp_path / "dummy.tar.gz"
+    with tarfile.open(dummy_tar, "w:gz") as tar:
+        pass
+
+    fd_def = {
+        "schema_version": 1,
+        "id": "fd-src",
+        "name": "fd",
+        "version": "10.0.0",
+        "type": "source",
+        "source": {
+            "type": "tar.gz",
+            "url": f"file://{dummy_tar}"
+        },
+        "executables": ["fd"],
+        "build": {
+            "system": "cargo"
+        }
+    }
+
+    # Mock subprocess.run for cargo build success
+    def fake_run(cmd, *args, **kwargs):
+        class DummyRes:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return DummyRes()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr("shutil.which", lambda cmd, path=None: "/usr/bin/cargo")
+
+    with pytest.raises(RuntimeError, match="Declared executable 'fd' was not produced"):
+        installer._install_source(fd_def, auto_yes=True)
+
+def test_cargo_detection_system_vs_isolated(temp_aster_env, monkeypatch, tmp_path):
+    config = temp_aster_env
+    registry = RegistryManager(config)
+    catalogue = CatalogueManager(config)
+    installer = PackageInstaller(config, registry, catalogue)
+
+    dummy_tar = tmp_path / "dummy.tar.gz"
+    with tarfile.open(dummy_tar, "w:gz") as tar:
+        pass
+
+    recorded_envs = []
+
+    def fake_run(cmd, *args, **kwargs):
+        env = kwargs.get("env", {})
+        recorded_envs.append(env)
+        # Create a fake binary in target/release/fd so executable validation succeeds
+        cwd = kwargs.get("cwd")
+        if cwd and "cargo" in cmd[0]:
+            target_dir = Path(cwd) / "target" / "release"
+            target_dir.mkdir(parents=True, exist_ok=True)
+            fd_bin = target_dir / "fd"
+            fd_bin.write_text("#!/bin/sh\necho fd")
+            fd_bin.chmod(0o755)
+        class DummyRes:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return DummyRes()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr("shutil.which", lambda cmd, path=None: "/usr/bin/cargo" if cmd == "cargo" else None)
+
+    fd_def = {
+        "schema_version": 1,
+        "id": "fd-src",
+        "name": "fd",
+        "version": "10.0.0",
+        "type": "source",
+        "source": {
+            "type": "tar.gz",
+            "url": f"file://{dummy_tar}"
+        },
+        "executables": ["fd"],
+        "build": {
+            "system": "cargo"
+        }
+    }
+
+    installer._install_source(fd_def, auto_yes=True)
+
+    # When system cargo is used, RUSTUP_HOME and CARGO_HOME should NOT be overridden with Aster's toolchain dir
+    build_env_used = recorded_envs[0]
+    assert "RUSTUP_HOME" not in build_env_used or build_env_used["RUSTUP_HOME"] != str(config.rust_toolchain_dir)
+    assert "CARGO_HOME" not in build_env_used or build_env_used["CARGO_HOME"] != str(config.rust_toolchain_dir)
+
+def test_cleanup_on_failure(temp_aster_env):
+    config = temp_aster_env
+    registry = RegistryManager(config)
+    catalogue = CatalogueManager(config)
+    installer = PackageInstaller(config, registry, catalogue)
+
+    failing_def = {
+        "schema_version": 1,
+        "id": "failing-pkg",
+        "name": "Failing Package",
+        "version": "1.0.0",
+        "type": "binary",
+        "downloads": {
+            "linux-x86_64": {
+                "url": "file:///nonexistent/archive.tar.gz"
+            }
+        }
+    }
+
+    with pytest.raises(FileNotFoundError):
+        installer._install_binary(failing_def)
+
+    staging_dir = config.build_dir / "staging-failing-pkg"
+    build_dir = config.build_dir / "build-failing-pkg"
+    final_package_dir = config.packages_dir / "failing-pkg"
+
+    assert not staging_dir.exists()
+    assert not build_dir.exists()
+    assert not final_package_dir.exists()
