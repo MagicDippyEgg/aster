@@ -78,6 +78,14 @@ def create_parser() -> argparse.ArgumentParser:
     repo_remove = repo_subparsers.add_parser("remove", help="Remove a package repository")
     repo_remove.add_argument("name", help="Repository name")
 
+    # aster config
+    config_parser = subparsers.add_parser("config", help="View or modify configuration")
+    config_subparsers = config_parser.add_subparsers(dest="config_command")
+    config_subparsers.add_parser("show", help="Show current configuration")
+
+    cache_rust_parser = config_subparsers.add_parser("cache-rust", help="Set Rust toolchain caching preference")
+    cache_rust_parser.add_argument("value", choices=["true", "false", "yes", "no", "1", "0"], help="Enable (true) or disable (false) Rust toolchain caching")
+
     return parser
 
 def main(args: Optional[List[str]] = None) -> int:
@@ -283,6 +291,26 @@ def main(args: Optional[List[str]] = None) -> int:
                 if not upgraded_any:
                     print("All packages are already up to date.")
             return 0
+
+        elif parsed_args.command == "config":
+            cfg_data = config.load_json(config.config_json)
+            subcmd = getattr(parsed_args, "config_command", None)
+            if subcmd == "cache-rust":
+                val = parsed_args.value.lower() in ("true", "yes", "1")
+                cfg_data["cache_rust_toolchain"] = val
+                config.save_json_atomic(config.config_json, cfg_data)
+                print(f"Set 'cache_rust_toolchain' to {val}.")
+                if not val and config.rust_toolchain_dir.exists():
+                    import shutil
+                    shutil.rmtree(config.rust_toolchain_dir, ignore_errors=True)
+                    print("Cleaned cached Rust toolchain directory.")
+                return 0
+            else:
+                print("Aster Configuration:")
+                print("-" * 40)
+                for k, v in cfg_data.items():
+                    print(f"  {k:<25}: {v}")
+                return 0
 
         elif parsed_args.command == "repo":
             repos_data = config.load_json(config.repositories_json)

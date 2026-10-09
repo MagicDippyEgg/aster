@@ -367,6 +367,114 @@ class PackageInstaller:
                 if res.returncode != 0:
                     self._handle_build_failure(res.stdout + "\n" + res.stderr, f"Build step '{step}'")
 
+        elif build_system == "cargo":
+            print(f"Building {pkg_id} (cargo)...")
+            cargo_bin = shutil.which("cargo", path=build_env.get("PATH"))
+            rust_toolchain_bin = self.config.rust_toolchain_dir / "bin"
+            if not cargo_bin and (rust_toolchain_bin / "cargo").exists():
+                cargo_bin = str(rust_toolchain_bin / "cargo")
+
+            downloaded_toolchain = False
+            if not cargo_bin:
+                print(f"\nAster: Cargo is required to build {pkg_id}.")
+                print("       Rust is not installed in Aster's build environment.")
+                print("       Downloading an isolated Rust toolchain...")
+
+                self.config.rust_toolchain_dir.mkdir(parents=True, exist_ok=True)
+                rustup_init_path = self.config.downloads_cache / "rustup-init"
+                arch_key = platform.machine().lower()
+                rustup_arch = "x86_64" if arch_key in ("x86_64", "amd64") else ("aarch64" if arch_key in ("aarch64", "arm64") else arch_key)
+                rustup_url = f"https://static.rust-lang.org/rustup/dist/{rustup_arch}-unknown-linux-gnu/rustup-init"
+
+                try:
+                    fetch_url_to_file(rustup_url, rustup_init_path, timeout=60)
+                    rustup_init_path.chmod(0o755)
+
+                    tc_env = build_env.copy()
+                    tc_env["RUSTUP_HOME"] = str(self.config.rust_toolchain_dir)
+                    tc_env["CARGO_HOME"] = str(self.config.rust_toolchain_dir)
+
+                    res = subprocess.run(
+                        [str(rustup_init_path), "-y", "--no-modify-path", "--profile", "minimal"],
+                        capture_output=True, text=True, env=tc_env
+                    )
+                    if res.returncode != 0:
+                        raise RuntimeError(f"Failed to bootstrap isolated Rust toolchain: {res.stderr}")
+
+                    cargo_bin = str(rust_toolchain_bin / "cargo")
+                    downloaded_toolchain = True
+                except Exception as e:
+                    if downloaded_toolchain and self.config.rust_toolchain_dir.exists():
+                        shutil.rmtree(self.config.rust_toolchain_dir)
+                    raise RuntimeError(f"Failed to install isolated Rust toolchain: {e}")
+
+            build_env["RUSTUP_HOME"] = str(self.config.rust_toolchain_dir)
+            build_env["CARGO_HOME"] = str(self.config.rust_toolchain_dir)
+            build_env["PATH"] = os.pathsep.join([str(rust_toolchain_bin), build_env.get("PATH", "")])
+
+            cargo_cmd = [cargo_bin, "build"]
+            if build_info.get("release", True):
+                cargo_cmd.append("--release")
+            if build_info.get("locked", False):
+                cargo_cmd.append("--locked")
+
+            res = subprocess.run(cargo_cmd, cwd=str(build_dir), capture_output=True, text=True, env=build_env)
+            if res.returncode != 0:
+                if downloaded_toolchain and self.config.load_json(self.config.config_json).get("cache_rust_toolchain") is False:
+                    shutil.rmtree(self.config.rust_toolchain_dir, ignore_errors=True)
+                self._handle_build_failure(res.stdout + "\n" + res.stderr, "Cargo build")
+
+            # Stage declared executables or find built binaries in target/release
+            target_profile = "release" if build_info.get("release", True) else "debug"
+            target_dir = build_dir / "target" / target_profile
+
+            declared_execs = pkg_def.get("executables") or build_info.get("executables") or []
+            if isinstance(declared_execs, str):
+                declared_execs = [declared_execs]
+
+            staging_bin = staging_dir / "bin"
+            staging_bin.mkdir(parents=True, exist_ok=True)
+
+            if declared_execs:
+                for exe_name in declared_execs:
+                    built_exe = target_dir / exe_name
+                    if built_exe.exists():
+                        shutil.copy(built_exe, staging_bin / exe_name)
+                        (staging_bin / exe_name).chmod(0o755)
+            else:
+                # Copy executables from target_dir
+                if target_dir.exists():
+                    for item in target_dir.iterdir():
+                        if item.is_file() and os.access(item, os.X_OK) and not item.name.startswith("."):
+                            shutil.copy(item, staging_bin / item.name)
+                            (staging_bin / item.name).chmod(0o755)
+
+            # Caching preference prompt if downloaded
+            if downloaded_toolchain or (rust_toolchain_bin / "cargo").exists():
+                cfg_data = self.config.load_json(self.config.config_json)
+                cache_pref = cfg_data.get("cache_rust_toolchain")
+
+                if cache_pref is None:
+                    print("\nKeep the downloaded Rust toolchain and")
+                    print("Cargo dependencies cached for future installs?")
+                    if auto_yes:
+                        choice = True
+                    else:
+                        try:
+                            resp = input("[Y/n]: ").strip().lower()
+                            choice = resp in ("", "y", "yes")
+                        except (EOFError, KeyboardInterrupt):
+                            choice = True
+
+                    cfg_data["cache_rust_toolchain"] = choice
+                    self.config.save_json_atomic(self.config.config_json, cfg_data)
+                    print(f"\nPreference saved: cache_rust_toolchain = {choice}")
+                    print("You can change this setting anytime using: aster config cache-rust <true|false>\n")
+                    cache_pref = choice
+
+                if cache_pref is False and self.config.rust_toolchain_dir.exists():
+                    shutil.rmtree(self.config.rust_toolchain_dir, ignore_errors=True)
+
         elif build_system == "cmake":
             print(f"Building {pkg_id} (cmake)...")
             cmake_build_dir = build_dir / "build_output"
