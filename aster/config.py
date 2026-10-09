@@ -210,6 +210,8 @@ class AsterConfig:
         self.build_dir = self.root_dir / "build"
         self.repository_cache = self.root_dir / "repository-cache"
         self.logs_dir = self.root_dir / "logs"
+        self.toolchains_dir = self.cache_dir / "toolchains"
+        self.rust_toolchain_dir = self.toolchains_dir / "rust"
 
     def ensure_directories(self):
         """Creates all required directories if they don't exist."""
