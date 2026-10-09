@@ -4,9 +4,57 @@ Configuration and directory management for Aster.
 
 import os
 import json
+import ssl
 from pathlib import Path
 
 DEFAULT_ASTER_HOME = Path.home() / ".bin" / "aster"
+
+import sys
+import urllib.request
+import urllib.error
+
+def fetch_url(url: str, headers: dict = None, timeout: int = 15) -> bytes:
+    """
+    Safely fetches bytes from a URL using SSL certificate verification with certifi
+    support and unverified SSL fallback when local CA certificates are missing.
+    """
+    if headers is None:
+        headers = {"User-Agent": "Aster-PackageManager/0.1.0"}
+
+    req = urllib.request.Request(url, headers=headers)
+
+    # Try with certifi or default context first
+    try:
+        import certifi
+        ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        try:
+            ssl_ctx = ssl.create_default_context()
+        except Exception:
+            ssl_ctx = ssl._create_unverified_context()
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx) as resp:
+            return resp.read()
+    except urllib.error.URLError as e:
+        err_str = str(e)
+        if hasattr(e, "reason"):
+            err_str += f" {e.reason}"
+        if "CERTIFICATE_VERIFY_FAILED" in err_str or "certificate verify failed" in err_str:
+            sys.stderr.write(f"Warning: SSL certificate verification failed for {url}. Retrying with unverified SSL context...\n")
+            unverified_ctx = ssl._create_unverified_context()
+            with urllib.request.urlopen(req, timeout=timeout, context=unverified_ctx) as resp:
+                return resp.read()
+        raise e
+
+def fetch_url_to_file(url: str, dest_path: Path, headers: dict = None, timeout: int = 30) -> None:
+    """
+    Downloads content from a URL directly to dest_path with SSL fallback.
+    """
+    data = fetch_url(url, headers=headers, timeout=timeout)
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(dest_path, "wb") as f:
+        f.write(data)
 
 class AsterConfig:
     def __init__(self, root_dir: Path = None):

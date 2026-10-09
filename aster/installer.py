@@ -13,7 +13,7 @@ import urllib.error
 import subprocess
 from pathlib import Path
 from typing import Dict, Any, List, Optional
-from aster.config import AsterConfig
+from aster.config import AsterConfig, fetch_url_to_file
 from aster.registry import RegistryManager
 from aster.catalogue import CatalogueManager
 
@@ -100,10 +100,8 @@ class PackageInstaller:
 
         if url.startswith("http://") or url.startswith("https://"):
             try:
-                req = urllib.request.Request(url, headers={"User-Agent": "Aster-PackageManager/0.1.0"})
-                with urllib.request.urlopen(req, timeout=30) as resp, open(dest_archive, "wb") as f:
-                    shutil.copyfileobj(resp, f)
-            except urllib.error.URLError as e:
+                fetch_url_to_file(url, dest_archive, timeout=30)
+            except Exception as e:
                 raise RuntimeError(f"Failed to download asset from {url}: {e}")
         elif url.startswith("file://"):
             src_path = Path(url[7:])
@@ -253,9 +251,7 @@ class PackageInstaller:
         elif src_type in ("tar.gz", "archive", "url"):
             dest_archive = self.config.downloads_cache / f"{pkg_id}.tar.gz"
             if src_url.startswith("http://") or src_url.startswith("https://"):
-                req = urllib.request.Request(src_url, headers={"User-Agent": "Aster-PackageManager/0.1.0"})
-                with urllib.request.urlopen(req, timeout=30) as resp, open(dest_archive, "wb") as f:
-                    shutil.copyfileobj(resp, f)
+                fetch_url_to_file(src_url, dest_archive, timeout=30)
             elif src_url.startswith("file://"):
                 shutil.copy(Path(src_url[7:]), dest_archive)
             else:

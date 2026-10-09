@@ -8,7 +8,7 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 from typing import Dict, Any, Optional
-from aster.config import AsterConfig
+from aster.config import AsterConfig, fetch_url
 from aster.schema import validate_index, validate_package_definition
 
 class CatalogueManager:
@@ -39,11 +39,9 @@ class CatalogueManager:
 
         if repo_url.startswith("http://") or repo_url.startswith("https://"):
             try:
-                req = urllib.request.Request(index_url, headers={"User-Agent": "Aster-PackageManager/0.1.0"})
-                with urllib.request.urlopen(req, timeout=15) as resp:
-                    raw_data = resp.read().decode("utf-8")
-                    data = json.loads(raw_data)
-            except urllib.error.URLError as e:
+                raw_bytes = fetch_url(index_url, timeout=15)
+                data = json.loads(raw_bytes.decode("utf-8"))
+            except Exception as e:
                 raise RuntimeError(f"Failed to fetch repository index from {index_url}: {e}")
         elif repo_url.startswith("file://"):
             local_path = Path(repo_url[7:]) / "index.json"
@@ -127,10 +125,9 @@ class CatalogueManager:
 
             if repo_url.startswith("http://") or repo_url.startswith("https://"):
                 try:
-                    req = urllib.request.Request(def_url, headers={"User-Agent": "Aster-PackageManager/0.1.0"})
-                    with urllib.request.urlopen(req, timeout=15) as resp:
-                        data = json.loads(resp.read().decode("utf-8"))
-                except urllib.error.URLError as e:
+                    raw_bytes = fetch_url(def_url, timeout=15)
+                    data = json.loads(raw_bytes.decode("utf-8"))
+                except Exception as e:
                     raise RuntimeError(f"Failed to fetch package definition from {def_url}: {e}")
             else:
                 local_def = Path(repo_url[7:] if repo_url.startswith("file://") else repo_url) / def_path
