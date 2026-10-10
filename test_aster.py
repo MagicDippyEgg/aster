@@ -444,6 +444,39 @@ def test_cargo_detection_system_vs_isolated(temp_aster_env, monkeypatch, tmp_pat
     assert "RUSTUP_HOME" not in build_env_used or build_env_used["RUSTUP_HOME"] != str(config.rust_toolchain_dir)
     assert "CARGO_HOME" not in build_env_used or build_env_used["CARGO_HOME"] != str(config.rust_toolchain_dir)
 
+def test_install_flattening_name_collision(temp_aster_env, tmp_path):
+    # Tests installing an archive where the single top-level directory has the same name
+    # as an executable inside it (e.g. age-bin with staging-age-bin/age/age)
+    config = temp_aster_env
+    registry = RegistryManager(config)
+    catalogue = CatalogueManager(config)
+    installer = PackageInstaller(config, registry, catalogue)
+
+    age_exe = tmp_path / "age_exe"
+    age_exe.write_text("#!/bin/sh\necho age")
+    age_exe.chmod(0o755)
+
+    age_archive = tmp_path / "age-v1.1.1-linux-amd64.tar.gz"
+    with tarfile.open(age_archive, "w:gz") as tar:
+        # Top level directory "age", containing executable file "age"
+        tar.add(age_exe, arcname="age/age")
+
+    age_bin_def = {
+        "schema_version": 1,
+        "id": "age-bin",
+        "name": "age",
+        "version": "1.1.1",
+        "type": "binary",
+        "downloads": {
+            "linux-x86_64": {"url": f"file://{age_archive}"},
+            "linux-aarch64": {"url": f"file://{age_archive}"}
+        }
+    }
+
+    installer._install_binary(age_bin_def)
+    assert registry.is_installed("age-bin")
+    assert (config.bin_dir / "age").exists()
+
 def test_install_tar_xz_binary_and_source(temp_aster_env, tmp_path):
     config = temp_aster_env
     registry = RegistryManager(config)

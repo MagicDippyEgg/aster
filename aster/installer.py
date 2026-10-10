@@ -245,9 +245,11 @@ class PackageInstaller:
             extracted_items = [p for p in staging_dir.iterdir()]
             if len(extracted_items) == 1 and extracted_items[0].is_dir():
                 nested_dir = extracted_items[0]
-                for item in nested_dir.iterdir():
+                tmp_nested = staging_dir / "__nested_tmp__"
+                shutil.move(str(nested_dir), str(tmp_nested))
+                for item in tmp_nested.iterdir():
                     shutil.move(str(item), str(staging_dir / item.name))
-                shutil.rmtree(str(nested_dir))
+                shutil.rmtree(str(tmp_nested))
 
             # Locate binaries in staging
             extracted_bin_dir = staging_dir / "bin"
@@ -382,9 +384,11 @@ class PackageInstaller:
             if len(extracted_items) == 1 and extracted_items[0].is_dir():
                 nested_dir = extracted_items[0]
                 if not (build_dir / "CMakeLists.txt").exists() and not (build_dir / "Makefile").exists():
-                    for item in nested_dir.iterdir():
+                    tmp_nested = build_dir / "__nested_tmp__"
+                    shutil.move(str(nested_dir), str(tmp_nested))
+                    for item in tmp_nested.iterdir():
                         shutil.move(str(item), str(build_dir / item.name))
-                    shutil.rmtree(str(nested_dir))
+                    shutil.rmtree(str(tmp_nested))
 
             # Build steps
             build_info = pkg_def.get("build", {})
