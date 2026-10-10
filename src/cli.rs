@@ -95,7 +95,10 @@ enum ConfigCommand {
     /// Show current configuration
     Show,
     /// Set Rust toolchain caching preference
-    CacheRust { value: String },
+    CacheRust {
+        #[arg(value_parser = ["true", "false", "yes", "no", "1", "0"])]
+        value: String,
+    },
 }
 
 /// Entry point mirroring the original `main(args)` function.

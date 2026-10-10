@@ -124,9 +124,15 @@ impl CatalogueManager {
     }
 
     /// Searches across cached indexes in descending priority order.
+    ///
+    /// The winning repository for each package ID is resolved first (highest
+    /// priority wins), and only then is the query applied. This keeps search
+    /// results consistent with what installation would actually select.
     pub fn search_packages(&self, query: &str) -> Result<Map<String, Value>> {
         let query_lower = query.to_lowercase();
-        let mut results: Map<String, Value> = Map::new();
+
+        let mut winners: Vec<(String, Value)> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for (repo_name, _) in self.get_sorted_repositories()? {
             let index = match self.get_cached_index(&repo_name)? {
                 Some(idx) => idx,
@@ -137,21 +143,26 @@ impl CatalogueManager {
                 None => continue,
             };
             for (pkg_id, pkg_info) in pkgs {
-                if results.contains_key(pkg_id) {
+                if !seen.insert(pkg_id.clone()) {
                     continue;
                 }
-                let desc = pkg_info
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if query_lower.is_empty()
-                    || pkg_id.to_lowercase().contains(&query_lower)
-                    || desc.to_lowercase().contains(&query_lower)
-                {
-                    let mut entry = pkg_info.as_object().cloned().unwrap_or_default();
-                    entry.insert("repository".to_string(), Value::String(repo_name.clone()));
-                    results.insert(pkg_id.clone(), Value::Object(entry));
-                }
+                let mut entry = pkg_info.as_object().cloned().unwrap_or_default();
+                entry.insert("repository".to_string(), Value::String(repo_name.clone()));
+                winners.push((pkg_id.clone(), Value::Object(entry)));
+            }
+        }
+
+        let mut results: Map<String, Value> = Map::new();
+        for (pkg_id, entry) in winners {
+            let desc = entry
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if query_lower.is_empty()
+                || pkg_id.to_lowercase().contains(&query_lower)
+                || desc.to_lowercase().contains(&query_lower)
+            {
+                results.insert(pkg_id, entry);
             }
         }
         Ok(results)
@@ -163,6 +174,18 @@ impl CatalogueManager {
         package_id: &str,
         repo_name: Option<&str>,
     ) -> Result<Option<Value>> {
+        Ok(self
+            .get_package_definition_with_source(package_id, repo_name)?
+            .map(|(def, _)| def))
+    }
+
+    /// Fetches the package definition JSON for `package_id` together with the
+    /// name of the repository it was resolved from.
+    pub fn get_package_definition_with_source(
+        &self,
+        package_id: &str,
+        repo_name: Option<&str>,
+    ) -> Result<Option<(Value, String)>> {
         let repos = self.get_repositories()?;
         let target_repos: Vec<(String, Value)> = match repo_name {
             Some(name) => match repos.get(name) {
@@ -197,7 +220,7 @@ impl CatalogueManager {
                 let map = self.config.load_json(&cached_def_file)?;
                 let data = Value::Object(map);
                 validate_package_definition(&data)?;
-                return Ok(Some(data));
+                return Ok(Some((data, rname)));
             }
 
             let repo_url = repos
@@ -232,7 +255,7 @@ impl CatalogueManager {
 
             validate_package_definition(&data)?;
             self.config.save_json_atomic(&cached_def_file, &data)?;
-            return Ok(Some(data));
+            return Ok(Some((data, rname)));
         }
 
         Ok(None)

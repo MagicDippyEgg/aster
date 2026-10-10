@@ -525,3 +525,222 @@ fn test_package_installer_public_api() {
         aster::catalogue::CatalogueManager,
     ) -> PackageInstaller = PackageInstaller::new;
 }
+
+#[test]
+fn test_cache_rust_invalid_value_does_not_modify_config() {
+    let f = Fixture::new();
+
+    fs::create_dir_all(&f.config.rust_toolchain_dir).unwrap();
+    let marker = f.config.rust_toolchain_dir.join("marker");
+    fs::write(&marker, b"keep").unwrap();
+
+    let before = fs::read_to_string(&f.config.config_json).unwrap();
+
+    let out = f.run_cli(&["config", "cache-rust", "ture"]);
+    assert_ne!(code(&out), 0, "invalid value must be rejected");
+    assert!(!stdout(&out).contains("Set 'cache_rust_toolchain'"));
+    let after = fs::read_to_string(&f.config.config_json).unwrap();
+    assert_eq!(before, after, "invalid input must not modify the config");
+    assert!(
+        marker.exists(),
+        "invalid input must not delete the cached Rust toolchain"
+    );
+
+    // Valid values are still accepted.
+    assert_eq!(code(&f.run_cli(&["config", "cache-rust", "no"])), 0);
+    let cfg = f.config.load_json(&f.config.config_json).unwrap();
+    assert_eq!(cfg.get("cache_rust_toolchain"), Some(&json!(false)));
+    assert!(
+        !f.config.rust_toolchain_dir.exists(),
+        "disabling caching should clean the cached toolchain"
+    );
+
+    assert_eq!(code(&f.run_cli(&["config", "cache-rust", "yes"])), 0);
+    let cfg = f.config.load_json(&f.config.config_json).unwrap();
+    assert_eq!(cfg.get("cache_rust_toolchain"), Some(&json!(true)));
+}
+
+#[test]
+fn test_empty_build_steps_falls_through_to_cargo() {
+    let f = Fixture::new();
+    let archive = f.temp.path().join("empty-steps-src.tar.gz");
+    make_tar_gz(
+        &archive,
+        &[("Cargo.toml", b"[package]\nname = \"emptysteps\"\n", 0o644)],
+    );
+
+    let exec = FakeExecutor::new()
+        .with_which("cargo", "/usr/bin/cargo")
+        .on_run(|argv, cwd| {
+            if argv[0].contains("cargo") {
+                if let Some(cwd) = cwd {
+                    let target = cwd.join("target").join("release");
+                    fs::create_dir_all(&target).unwrap();
+                    let exe = target.join("emptysteps");
+                    fs::write(&exe, "#!/bin/sh\necho ok\n").unwrap();
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+                    }
+                }
+            }
+        });
+    let exec = Arc::new(exec);
+    let installer = f.installer_with(exec.clone());
+
+    let def = json!({
+        "schema_version": 1,
+        "id": "emptysteps-src",
+        "name": "emptysteps",
+        "version": "1.0.0",
+        "type": "source",
+        "source": {"type": "tar.gz", "url": format!("file://{}", archive.display())},
+        "build": {"system": "cargo", "steps": []},
+        "executables": ["emptysteps"]
+    });
+
+    installer.install_source(&def, true).unwrap();
+
+    let commands = exec.commands();
+    assert!(
+        commands
+            .iter()
+            .any(|c| c.first().map(|s| s.contains("cargo")).unwrap_or(false)),
+        "cargo build should run when steps is an empty array"
+    );
+    assert!(f.config.bin_dir.join("emptysteps").exists());
+}
+
+#[test]
+fn test_search_uses_winning_repository_definition() {
+    let f = Fixture::new();
+
+    let repo_high = f.temp.path().join("repo_high");
+    fs::create_dir_all(repo_high.join("packages")).unwrap();
+    write_json(
+        &repo_high.join("index.json"),
+        &json!({
+            "schema_version": 1,
+            "packages": {
+                "toolkit": {"definition": "packages/toolkit.json", "type": "binary", "description": "High priority build"}
+            }
+        }),
+    );
+    write_json(
+        &repo_high.join("packages/toolkit.json"),
+        &json!({"schema_version": 1, "id": "toolkit", "name": "ToolkitHigh", "version": "2.0.0", "type": "binary"}),
+    );
+
+    let repo_low = f.temp.path().join("repo_low");
+    fs::create_dir_all(repo_low.join("packages")).unwrap();
+    write_json(
+        &repo_low.join("index.json"),
+        &json!({
+            "schema_version": 1,
+            "packages": {
+                "toolkit": {"definition": "packages/toolkit.json", "type": "binary", "description": "alpha searchable text"}
+            }
+        }),
+    );
+    write_json(
+        &repo_low.join("packages/toolkit.json"),
+        &json!({"schema_version": 1, "id": "toolkit", "name": "ToolkitLow", "version": "1.0.0", "type": "binary"}),
+    );
+
+    let repos = json!({
+        "schema_version": 1,
+        "repositories": {
+            "repo-high": {"name": "repo-high", "url": repo_high.to_string_lossy(), "priority": 200},
+            "repo-low": {"name": "repo-low", "url": repo_low.to_string_lossy(), "priority": 50}
+        }
+    });
+    f.config
+        .save_json_atomic(&f.config.repositories_json, &repos)
+        .unwrap();
+
+    let catalogue = f.catalogue();
+    catalogue.update_all().unwrap();
+
+    // A term matching only the lower-priority copy must not surface it,
+    // because installation would select the higher-priority definition.
+    let results = catalogue.search_packages("alpha").unwrap();
+    assert!(
+        !results.contains_key("toolkit"),
+        "search must not show a lower-priority copy that installation would not select"
+    );
+
+    // When the query matches the id, search reports the winning repository.
+    let by_id = catalogue.search_packages("toolkit").unwrap();
+    assert_eq!(by_id["toolkit"]["repository"], "repo-high");
+    assert_eq!(by_id["toolkit"]["description"], "High priority build");
+
+    // Installation resolves the same definition.
+    let def = catalogue
+        .get_package_definition("toolkit", None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(def["name"], "ToolkitHigh");
+}
+
+#[test]
+fn test_install_records_actual_source_repository() {
+    let f = Fixture::new();
+
+    let community = f.temp.path().join("community");
+    fs::create_dir_all(community.join("packages")).unwrap();
+    let archive = f.temp.path().join("comm-pkg.tar.gz");
+    make_tar_gz(
+        &archive,
+        &[("bin/comm-pkg", b"#!/bin/sh\necho comm", 0o755)],
+    );
+    write_json(
+        &community.join("index.json"),
+        &json!({
+            "schema_version": 1,
+            "packages": {
+                "comm-pkg": {"definition": "packages/comm-pkg.json", "type": "binary", "description": "Community package"}
+            }
+        }),
+    );
+    write_json(
+        &community.join("packages/comm-pkg.json"),
+        &json!({
+            "schema_version": 1,
+            "id": "comm-pkg",
+            "name": "CommPkg",
+            "version": "1.0.0",
+            "type": "binary",
+            "downloads": {
+                "linux-x86_64": {"url": format!("file://{}", archive.display())},
+                "linux-aarch64": {"url": format!("file://{}", archive.display())}
+            }
+        }),
+    );
+
+    let repos = json!({
+        "schema_version": 1,
+        "repositories": {
+            "default": {"name": "default", "url": f.cat_dir.to_string_lossy(), "priority": 100},
+            "community": {"name": "community", "url": community.to_string_lossy(), "priority": 200}
+        }
+    });
+    f.config
+        .save_json_atomic(&f.config.repositories_json, &repos)
+        .unwrap();
+
+    f.catalogue().update_all().unwrap();
+
+    f.installer().install("comm-pkg", true).unwrap();
+
+    let info = f
+        .registry()
+        .get_installed_package("comm-pkg")
+        .unwrap()
+        .unwrap();
+    assert_eq!(info["source_repository"], "community");
+
+    let out = f.run_cli(&["list"]);
+    assert_eq!(code(&out), 0);
+    assert!(stdout(&out).contains("community"));
+}

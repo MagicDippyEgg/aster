@@ -172,12 +172,14 @@ impl PackageInstaller {
                 continue;
             }
 
-            let pkg_def = self.catalogue.get_package_definition(&pkg, None)?;
-            let pkg_def = pkg_def.ok_or_else(|| {
-                AsterError::Runtime(format!(
-                    "Package definition for '{pkg}' not found in catalogue."
-                ))
-            })?;
+            let (pkg_def, source_repo) = self
+                .catalogue
+                .get_package_definition_with_source(&pkg, None)?
+                .ok_or_else(|| {
+                    AsterError::Runtime(format!(
+                        "Package definition for '{pkg}' not found in catalogue."
+                    ))
+                })?;
 
             let pkg_type = pkg_def
                 .get("type")
@@ -185,8 +187,8 @@ impl PackageInstaller {
                 .unwrap_or("")
                 .to_string();
             match pkg_type.as_str() {
-                "binary" => self.install_binary(&pkg_def)?,
-                "source" => self.install_source(&pkg_def, auto_yes)?,
+                "binary" => self.install_binary_from(&pkg_def, &source_repo)?,
+                "source" => self.install_source_from(&pkg_def, auto_yes, &source_repo)?,
                 other => {
                     return Err(AsterError::Runtime(format!(
                         "Unsupported package type '{other}' for package '{pkg}'."
@@ -367,13 +369,18 @@ impl PackageInstaller {
 
     /// Installs a binary package from its definition.
     pub fn install_binary(&self, pkg_def: &Value) -> Result<()> {
+        self.install_binary_from(pkg_def, "default")
+    }
+
+    /// Installs a binary package, recording `source_repository` in the registry.
+    pub fn install_binary_from(&self, pkg_def: &Value, source_repository: &str) -> Result<()> {
         let pkg_id = pkg_def
             .get("id")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
         let mut provided_binaries: Vec<String> = Vec::new();
-        let result = self.do_install_binary(pkg_def, &mut provided_binaries);
+        let result = self.do_install_binary(pkg_def, source_repository, &mut provided_binaries);
         if result.is_err() {
             self.cleanup_failed_install(&pkg_id, &provided_binaries);
         }
@@ -383,6 +390,7 @@ impl PackageInstaller {
     fn do_install_binary(
         &self,
         pkg_def: &Value,
+        source_repository: &str,
         provided_binaries: &mut Vec<String>,
     ) -> Result<()> {
         let pkg_id = pkg_def
@@ -576,7 +584,7 @@ impl PackageInstaller {
             "binary",
             &installed_files,
             provided_binaries,
-            "default",
+            source_repository,
             None,
         )?;
         println!("Successfully installed '{pkg_id}' version {version}.");
@@ -585,13 +593,24 @@ impl PackageInstaller {
 
     /// Installs a source package by cloning/downloading and building it.
     pub fn install_source(&self, pkg_def: &Value, auto_yes: bool) -> Result<()> {
+        self.install_source_from(pkg_def, auto_yes, "default")
+    }
+
+    /// Installs a source package, recording `source_repository` in the registry.
+    pub fn install_source_from(
+        &self,
+        pkg_def: &Value,
+        auto_yes: bool,
+        source_repository: &str,
+    ) -> Result<()> {
         let pkg_id = pkg_def
             .get("id")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
         let mut provided_binaries: Vec<String> = Vec::new();
-        let result = self.do_install_source(pkg_def, auto_yes, &mut provided_binaries);
+        let result =
+            self.do_install_source(pkg_def, auto_yes, source_repository, &mut provided_binaries);
         if result.is_err() {
             self.cleanup_failed_install(&pkg_id, &provided_binaries);
         }
@@ -602,6 +621,7 @@ impl PackageInstaller {
         &self,
         pkg_def: &Value,
         auto_yes: bool,
+        source_repository: &str,
         provided_binaries: &mut Vec<String>,
     ) -> Result<()> {
         let pkg_id = pkg_def
@@ -727,7 +747,8 @@ impl PackageInstaller {
         let build_steps = build_info
             .and_then(|b| b.get("steps"))
             .and_then(|v| v.as_array())
-            .cloned();
+            .cloned()
+            .filter(|v| !v.is_empty());
 
         let staging_dir = self.config.build_dir.join(format!("staging-{pkg_id}"));
         if staging_dir.exists() {
@@ -899,7 +920,7 @@ impl PackageInstaller {
             "source",
             &installed_files,
             provided_binaries,
-            "default",
+            source_repository,
             None,
         )?;
         println!("Successfully compiled and installed '{pkg_id}' version {version}.");
