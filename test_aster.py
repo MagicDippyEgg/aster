@@ -473,3 +473,17 @@ def test_cleanup_on_failure(temp_aster_env):
     assert not staging_dir.exists()
     assert not build_dir.exists()
     assert not final_package_dir.exists()
+
+def test_search_word_boundary_matching(temp_aster_env):
+    config = temp_aster_env
+    catalogue = CatalogueManager(config)
+    catalogue.update_all()
+
+    # ripgrep-bin has description "line-oriented search tool" in temp_aster_env
+    # 'tern' should not match ripgrep-bin or any other package
+    results = catalogue.search_packages("tern")
+    assert "ripgrep-bin" not in results
+
+    # Exact word in description should match e.g. "search"
+    results_search = catalogue.search_packages("search")
+    assert "ripgrep-bin" in results_search

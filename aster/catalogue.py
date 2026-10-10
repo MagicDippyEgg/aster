@@ -87,7 +87,10 @@ class CatalogueManager:
         Searches across cached indexes of all repositories.
         Returns a dict mapping package_id to summary metadata.
         """
-        query_lower = query.lower() if query else ""
+        import re
+        query_lower = query.lower().strip() if query else ""
+        desc_pattern = re.compile(r'\b' + re.escape(query_lower) + r'\b', re.IGNORECASE) if query_lower else None
+
         results = {}
         repos = self.get_repositories()
         for repo_name in repos:
@@ -96,7 +99,16 @@ class CatalogueManager:
                 continue
             pkgs = index.get("packages", {})
             for pkg_id, pkg_info in pkgs.items():
-                if not query_lower or query_lower in pkg_id.lower() or query_lower in pkg_info.get("description", "").lower():
+                if not query_lower:
+                    matches = True
+                elif query_lower in pkg_id.lower():
+                    matches = True
+                elif desc_pattern and desc_pattern.search(pkg_info.get("description", "")):
+                    matches = True
+                else:
+                    matches = False
+
+                if matches:
                     entry = dict(pkg_info)
                     entry["repository"] = repo_name
                     results[pkg_id] = entry
