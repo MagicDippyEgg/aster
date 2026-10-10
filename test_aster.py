@@ -2,6 +2,8 @@ import json
 import pytest
 import shutil
 import tempfile
+import stat
+import zipfile
 import tarfile
 from pathlib import Path
 from aster.config import AsterConfig
@@ -535,6 +537,94 @@ def test_install_tar_xz_binary_and_source(temp_aster_env, tmp_path):
     installer._install_source(src_pkg_def, auto_yes=True)
     assert registry.is_installed("xzsrc-src")
     assert (config.bin_dir / "xzsrc").exists()
+
+def test_install_zip_preserves_executable_bits_and_discovers_multiple_binaries(temp_aster_env, tmp_path):
+    config = temp_aster_env
+    registry = RegistryManager(config)
+    catalogue = CatalogueManager(config)
+    installer = PackageInstaller(config, registry, catalogue)
+
+    archive_path = tmp_path / "yazi-release.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        # Include a single enclosing directory to exercise Aster's archive un-nesting.
+        for executable_name in ("yazi", "ya"):
+            item = zipfile.ZipInfo(f"yazi-release/{executable_name}")
+            item.create_system = 3  # Unix metadata, including executable permission bits.
+            item.external_attr = (stat.S_IFREG | 0o755) << 16
+            archive.writestr(item, f"#!/bin/sh\\necho {executable_name}\\n")
+
+    package = {
+        "schema_version": 1,
+        "id": "yazi-bin",
+        "name": "yazi",
+        "version": "26.9.1",
+        "type": "binary",
+        "downloads": {
+            "linux-x86_64": {"url": f"file://{archive_path}"},
+            "linux-aarch64": {"url": f"file://{archive_path}"}
+        }
+    }
+
+    installer._install_binary(package)
+
+    assert (config.bin_dir / "yazi").is_symlink()
+    assert (config.bin_dir / "ya").is_symlink()
+    installed = registry.get_installed_package("yazi-bin")
+    assert set(installed["provided_binaries"]) == {"yazi", "ya"}
+
+
+def test_cargo_custom_args_builds_declared_workspace_executables(temp_aster_env, monkeypatch, tmp_path):
+    config = temp_aster_env
+    registry = RegistryManager(config)
+    catalogue = CatalogueManager(config)
+    installer = PackageInstaller(config, registry, catalogue)
+
+    # A tiny source archive is enough because Cargo is mocked for this integration test.
+    source_dir = tmp_path / "yazi-source"
+    source_dir.mkdir()
+    (source_dir / "Cargo.toml").write_text("[workspace]\\nmembers = []\\n")
+    source_archive = tmp_path / "yazi-source.tar.gz"
+    with tarfile.open(source_archive, "w:gz") as archive:
+        archive.add(source_dir / "Cargo.toml", arcname="Cargo.toml")
+
+    commands = []
+
+    def fake_run(cmd, *args, **kwargs):
+        commands.append(cmd)
+        cwd = Path(kwargs["cwd"])
+        target_dir = cwd / "target" / "release"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for executable_name in ("yazi", "ya"):
+            executable = target_dir / executable_name
+            executable.write_text(f"#!/bin/sh\\necho {executable_name}\\n")
+            executable.chmod(0o755)
+
+        class DummyResult:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return DummyResult()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr("shutil.which", lambda cmd, path=None: "/usr/bin/cargo" if cmd == "cargo" else None)
+
+    package = {
+        "schema_version": 1,
+        "id": "yazi-src",
+        "name": "yazi",
+        "version": "26.9.1",
+        "type": "source",
+        "source": {"type": "tar.gz", "url": f"file://{source_archive}"},
+        "build": {"system": "cargo", "cargo_args": ["xtask", "build"]},
+        "executables": ["yazi", "ya"]
+    }
+
+    installer._install_source(package, auto_yes=True)
+
+    assert commands == [["/usr/bin/cargo", "xtask", "build"]]
+    assert (config.bin_dir / "yazi").is_symlink()
+    assert (config.bin_dir / "ya").is_symlink()
+
 
 def test_cleanup_on_failure(temp_aster_env):
     config = temp_aster_env
