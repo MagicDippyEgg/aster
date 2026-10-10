@@ -234,6 +234,18 @@ class PackageInstaller:
                         if zip_item.startswith("/") or ".." in zip_item:
                             raise RuntimeError(f"Unsafe file path in archive: {zip_item}")
                     zip_ref.extractall(path=staging_dir)
+                    # zipfile extracts file contents but does not restore Unix executable bits.
+                    # Preserve those bits so archives containing multiple commands (such as
+                    # Yazi's yazi and ya) are discovered instead of falling back to one name.
+                    for zip_item in zip_ref.infolist():
+                        unix_mode = zip_item.external_attr >> 16
+                        extracted_path = staging_dir / zip_item.filename
+                        if (
+                            not zip_item.is_dir()
+                            and extracted_path.is_file()
+                            and unix_mode & 0o111
+                        ):
+                            extracted_path.chmod(unix_mode & 0o777)
             else:
                 # Single executable file or uncompressed binary
                 dest_file = staging_dir / "bin" / pkg_id.replace("-bin", "")
@@ -425,6 +437,17 @@ class PackageInstaller:
                         self._handle_build_failure(res.stdout + "\n" + res.stderr, f"Build step '{step}'")
 
             elif build_system == "cargo":
+                custom_cargo_args = build_info.get("cargo_args")
+                if custom_cargo_args is not None and (
+                    not isinstance(custom_cargo_args, list)
+                    or not custom_cargo_args
+                    or any(not isinstance(arg, str) or not arg for arg in custom_cargo_args)
+                ):
+                    raise RuntimeError(
+                        "Invalid 'build.cargo_args' for package "
+                        f"'{pkg_id}': expected a non-empty list of strings."
+                    )
+
                 print(f"Building {pkg_id} (cargo)...")
                 system_cargo = shutil.which("cargo", path=build_env.get("PATH"))
                 rust_toolchain_bin = self.config.rust_toolchain_dir / "bin"
@@ -475,11 +498,17 @@ class PackageInstaller:
                     build_env["CARGO_HOME"] = str(self.config.rust_toolchain_dir)
                     build_env["PATH"] = os.pathsep.join([str(rust_toolchain_bin), build_env.get("PATH", "")])
 
-                cargo_cmd = [cargo_bin, "build"]
-                if build_info.get("release", True):
-                    cargo_cmd.append("--release")
-                if build_info.get("locked", False):
-                    cargo_cmd.append("--locked")
+                if custom_cargo_args is not None:
+                    # An explicit cargo_args list is the complete Cargo invocation after
+                    # the cargo executable, e.g. ["xtask", "build"]. Do not append the
+                    # normal "build", "--release", or "--locked" arguments to it.
+                    cargo_cmd = [cargo_bin, *custom_cargo_args]
+                else:
+                    cargo_cmd = [cargo_bin, "build"]
+                    if build_info.get("release", True):
+                        cargo_cmd.append("--release")
+                    if build_info.get("locked", False):
+                        cargo_cmd.append("--locked")
 
                 res = subprocess.run(cargo_cmd, cwd=str(build_dir), capture_output=True, text=True, env=build_env)
                 if res.returncode != 0:
