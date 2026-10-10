@@ -7,6 +7,7 @@ use aster::version::compare_versions;
 use common::*;
 use serde_json::json;
 use std::fs;
+use std::path::Path;
 use std::sync::Arc;
 
 #[test]
@@ -743,4 +744,172 @@ fn test_install_records_actual_source_repository() {
     let out = f.run_cli(&["list"]);
     assert_eq!(code(&out), 0);
     assert!(stdout(&out).contains("community"));
+}
+
+fn provided_binaries(f: &Fixture, pkg_id: &str) -> Vec<String> {
+    let info = f.registry().get_installed_package(pkg_id).unwrap().unwrap();
+    info["provided_binaries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn test_source_discovery_ignores_git_hook_samples() {
+    let f = Fixture::new();
+    let archive = f.temp.path().join("tree-src.tar.gz");
+    make_tar_gz(
+        &archive,
+        &[
+            (".git/hooks/applypatch-msg.sample", b"#!/bin/sh\n:\n", 0o755),
+            (".git/hooks/pre-commit.sample", b"#!/bin/sh\n:\n", 0o755),
+            ("bin/example-command", b"#!/bin/sh\necho example\n", 0o755),
+            ("Makefile", b"all:\n\t@true\ninstall:\n\t@true\n", 0o644),
+        ],
+    );
+
+    // make/make install are no-ops, so staging stays empty and the source-tree
+    // fallback discovery path runs.
+    let installer = f.installer_with(Arc::new(FakeExecutor::new()));
+
+    let def = json!({
+        "schema_version": 1,
+        "id": "example-src",
+        "name": "example",
+        "version": "1.0.0",
+        "type": "source",
+        "source": {"type": "tar.gz", "url": format!("file://{}", archive.display())},
+        "build": {"system": "make"}
+    });
+
+    installer.install_source(&def, true).unwrap();
+
+    let provided = provided_binaries(&f, "example-src");
+    assert!(
+        provided.contains(&"example-command".to_string()),
+        "real command should be discovered: {provided:?}"
+    );
+    assert!(
+        !provided
+            .iter()
+            .any(|n| n.contains("applypatch") || n.contains("pre-commit") || n.contains("sample")),
+        "git hook scripts must not be discovered: {provided:?}"
+    );
+    assert!(f.config.bin_dir.join("example-command").exists());
+    assert!(!f.config.bin_dir.join("applypatch-msg.sample").exists());
+    assert!(!f.config.bin_dir.join("pre-commit.sample").exists());
+    assert!(!f.config.bin_dir.join("bin").exists());
+}
+
+#[test]
+fn test_source_discovery_prefers_staging_over_source_tree() {
+    let f = Fixture::new();
+    let archive = f.temp.path().join("staged-src.tar.gz");
+    make_tar_gz(
+        &archive,
+        &[
+            (".git/hooks/applypatch-msg.sample", b"#!/bin/sh\n:\n", 0o755),
+            ("bin/decoy", b"#!/bin/sh\necho decoy\n", 0o755),
+            ("Makefile", b"all:\n\t@true\ninstall:\n\t@true\n", 0o644),
+        ],
+    );
+
+    // Simulate a make install target that installs into $(DESTDIR)/usr/local/bin.
+    let exec = FakeExecutor::new().on_run(|argv, _cwd| {
+        if argv.iter().any(|a| a == "install") {
+            if let Some(destdir) = argv.iter().find_map(|a| a.strip_prefix("DESTDIR=")) {
+                let bin = Path::new(destdir).join("usr/local/bin");
+                fs::create_dir_all(&bin).unwrap();
+                let exe = bin.join("real-cmd");
+                fs::write(&exe, "#!/bin/sh\necho real\n").unwrap();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+                }
+            }
+        }
+    });
+    let installer = f.installer_with(Arc::new(exec));
+
+    let def = json!({
+        "schema_version": 1,
+        "id": "staged-src",
+        "name": "staged",
+        "version": "1.0.0",
+        "type": "source",
+        "source": {"type": "tar.gz", "url": format!("file://{}", archive.display())},
+        "build": {"system": "make"}
+    });
+
+    installer.install_source(&def, true).unwrap();
+
+    assert_eq!(
+        provided_binaries(&f, "staged-src"),
+        vec!["real-cmd".to_string()]
+    );
+    assert!(f.config.bin_dir.join("real-cmd").exists());
+    assert!(
+        !f.config.bin_dir.join("decoy").exists(),
+        "source-tree binaries must not be exposed when staging has commands"
+    );
+    assert!(!f.config.bin_dir.join("applypatch-msg.sample").exists());
+}
+
+#[test]
+fn test_tree_and_cloc_style_packages_do_not_conflict_over_git_hooks() {
+    let f = Fixture::new();
+    // Real executor: the custom "chmod +x cloc" step must actually run.
+    let installer = f.installer();
+
+    // tree-src style: make installs into $(DESTDIR)/usr/local/bin.
+    let tree_archive = f.temp.path().join("tree.tar.gz");
+    make_tar_gz(
+        &tree_archive,
+        &[
+            (".git/hooks/applypatch-msg.sample", b"#!/bin/sh\n:\n", 0o755),
+            ("tree", b"#!/bin/sh\necho tree\n", 0o755),
+            ("Makefile", b"all:\n\t@true\ninstall:\n\t@true\n", 0o644),
+        ],
+    );
+
+    // cloc-src style: no install target; custom steps make a root script executable.
+    let cloc_archive = f.temp.path().join("cloc.tar.gz");
+    make_tar_gz(
+        &cloc_archive,
+        &[
+            (".git/hooks/applypatch-msg.sample", b"#!/bin/sh\n:\n", 0o755),
+            ("cloc", b"#!/usr/bin/env perl\nprint \"cloc\\n\";\n", 0o644),
+        ],
+    );
+
+    let tree_def = json!({
+        "schema_version": 1,
+        "id": "tree-src",
+        "name": "tree",
+        "version": "2.3.2",
+        "type": "source",
+        "source": {"type": "tar.gz", "url": format!("file://{}", tree_archive.display())},
+        "build": {"system": "make"}
+    });
+    let cloc_def = json!({
+        "schema_version": 1,
+        "id": "cloc-src",
+        "name": "cloc",
+        "version": "2.10",
+        "type": "source",
+        "source": {"type": "tar.gz", "url": format!("file://{}", cloc_archive.display())},
+        "build": {"steps": ["chmod +x cloc"]}
+    });
+
+    installer.install_source(&tree_def, true).unwrap();
+    installer.install_source(&cloc_def, true).unwrap();
+
+    assert_eq!(provided_binaries(&f, "tree-src"), vec!["tree".to_string()]);
+    assert_eq!(provided_binaries(&f, "cloc-src"), vec!["cloc".to_string()]);
+    assert!(f.config.bin_dir.join("tree").exists());
+    assert!(f.config.bin_dir.join("cloc").exists());
+    assert!(!f.config.bin_dir.join("applypatch-msg.sample").exists());
 }

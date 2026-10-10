@@ -868,29 +868,28 @@ impl PackageInstaller {
             let _res = self.executor.run(&install_cmd, None, &build_env)?;
         }
 
-        let extracted_bin_dir = staging_dir.join("bin");
-        if !extracted_bin_dir.exists() {
+        // Prefer executables that the build system installed into the staging
+        // directory. Only fall back to scanning the source tree when staging
+        // contains none, and never treat VCS metadata or build-system internals
+        // (e.g. `.git/hooks/*.sample`) as package commands.
+        *provided_binaries = collect_staging_executables(&staging_dir);
+        if provided_binaries.is_empty() {
+            let extracted_bin_dir = staging_dir.join("bin");
             std::fs::create_dir_all(&extracted_bin_dir)?;
             for fp in walk_files(&build_dir) {
-                if fp.is_file() && is_executable(&fp) {
-                    let fname = fp
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    if fname.ends_with(".sh") {
-                        continue;
-                    }
-                    std::fs::copy(&fp, extracted_bin_dir.join(&fname))?;
+                if !fp.is_file() || !is_executable(&fp) {
+                    continue;
                 }
+                let fname = fp
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if !is_command_candidate(&fname) {
+                    continue;
+                }
+                std::fs::copy(&fp, extracted_bin_dir.join(&fname))?;
             }
-        }
-
-        if extracted_bin_dir.exists() {
-            *provided_binaries = read_dir_paths(&extracted_bin_dir)
-                .into_iter()
-                .filter(|p| p.is_file())
-                .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                .collect();
+            *provided_binaries = list_regular_files(&extracted_bin_dir);
         }
 
         if provided_binaries.is_empty() {
@@ -1302,7 +1301,11 @@ fn walk_files(root: &Path) -> Vec<PathBuf> {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
                 if path.is_dir() {
+                    if is_excluded_dir(&name) {
+                        continue;
+                    }
                     walk(&path, out);
                 } else {
                     out.push(path);
@@ -1312,6 +1315,93 @@ fn walk_files(root: &Path) -> Vec<PathBuf> {
     }
     walk(root, &mut out);
     out
+}
+
+/// Conventional installation directories (relative to a staging prefix) that a
+/// build system may use to install commands.
+const STAGING_BIN_DIRS: [&str; 6] = [
+    "bin",
+    "sbin",
+    "usr/bin",
+    "usr/sbin",
+    "usr/local/bin",
+    "local/bin",
+];
+
+/// Collects executable command names that the build system installed into
+/// conventional `bin` directories under `staging_dir`.
+fn collect_staging_executables(staging_dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for rel in STAGING_BIN_DIRS {
+        for path in read_dir_paths(&staging_dir.join(rel)) {
+            if !path.is_file() || !is_executable(&path) {
+                continue;
+            }
+            if let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_string()) {
+                if name.starts_with('.') {
+                    continue;
+                }
+                names.push(name);
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn list_regular_files(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = read_dir_paths(dir)
+        .into_iter()
+        .filter(|p| p.is_file())
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Directory names that must never be traversed when discovering commands.
+fn is_excluded_dir(name: &str) -> bool {
+    name.starts_with('.')
+        || matches!(
+            name,
+            "CMakeFiles" | "node_modules" | "autom4te.cache" | "target"
+        )
+}
+
+/// Whether a discovered file looks like a real command rather than a VCS or
+/// build-system helper script.
+fn is_command_candidate(name: &str) -> bool {
+    if name.is_empty() || name.starts_with('.') {
+        return false;
+    }
+
+    const SKIP_SUFFIXES: [&str; 13] = [
+        ".sh", ".bash", ".zsh", ".sample", ".in", ".inc", ".m4", ".am", ".ac", ".pyc", ".o", ".a",
+        ".cmake",
+    ];
+    if SKIP_SUFFIXES.iter().any(|s| name.ends_with(s)) {
+        return false;
+    }
+
+    const SKIP_NAMES: [&str; 15] = [
+        "configure",
+        "config.status",
+        "config.guess",
+        "config.sub",
+        "libtool",
+        "ltmain.sh",
+        "install-sh",
+        "depcomp",
+        "missing",
+        "compile",
+        "test-driver",
+        "mkinstalldirs",
+        "Makefile",
+        "makefile",
+        "CMakeCache.txt",
+    ];
+    !SKIP_NAMES.contains(&name)
 }
 
 fn detect_compression(file: std::fs::File) -> Result<Box<dyn Read>> {
