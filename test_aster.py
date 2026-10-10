@@ -655,3 +655,109 @@ def test_cleanup_on_failure(temp_aster_env):
     assert not staging_dir.exists()
     assert not build_dir.exists()
     assert not final_package_dir.exists()
+
+
+def test_repository_priority_resolution(temp_aster_env, tmp_path):
+    config = temp_aster_env
+
+    # Create Repo A (low priority: 50)
+    repo_a_dir = tmp_path / "repo_a"
+    repo_a_dir.mkdir()
+    (repo_a_dir / "packages").mkdir()
+    index_a = {
+        "schema_version": 1,
+        "packages": {
+            "common-app": {
+                "definition": "packages/common-app.json",
+                "type": "binary",
+                "description": "Common App from Repo A (low priority)"
+            }
+        }
+    }
+    with open(repo_a_dir / "index.json", "w") as f:
+        json.dump(index_a, f)
+    def_a = {
+        "schema_version": 1,
+        "id": "common-app",
+        "name": "CommonAppA",
+        "version": "1.0.0",
+        "type": "binary"
+    }
+    with open(repo_a_dir / "packages" / "common-app.json", "w") as f:
+        json.dump(def_a, f)
+
+    # Create Repo B (high priority: 200)
+    repo_b_dir = tmp_path / "repo_b"
+    repo_b_dir.mkdir()
+    (repo_b_dir / "packages").mkdir()
+    index_b = {
+        "schema_version": 1,
+        "packages": {
+            "common-app": {
+                "definition": "packages/common-app.json",
+                "type": "binary",
+                "description": "Common App from Repo B (high priority)"
+            }
+        }
+    }
+    with open(repo_b_dir / "index.json", "w") as f:
+        json.dump(index_b, f)
+    def_b = {
+        "schema_version": 1,
+        "id": "common-app",
+        "name": "CommonAppB",
+        "version": "2.0.0",
+        "type": "binary"
+    }
+    with open(repo_b_dir / "packages" / "common-app.json", "w") as f:
+        json.dump(def_b, f)
+
+    # Configure both repositories
+    repos_data = {
+        "schema_version": 1,
+        "repositories": {
+            "repo-a": {"name": "repo-a", "url": str(repo_a_dir), "priority": 50},
+            "repo-b": {"name": "repo-b", "url": str(repo_b_dir), "priority": 200}
+        }
+    }
+    config.save_json_atomic(config.repositories_json, repos_data)
+
+    catalogue = CatalogueManager(config)
+    catalogue.update_all()
+
+    # Priority sorting check
+    sorted_repos = catalogue.get_sorted_repositories()
+    assert [name for name, _ in sorted_repos] == ["repo-b", "repo-a"]
+
+    # Search check - higher priority repo info should win
+    search_res = catalogue.search_packages("common-app")
+    assert search_res["common-app"]["description"] == "Common App from Repo B (high priority)"
+    assert search_res["common-app"]["repository"] == "repo-b"
+
+    # Definition check - higher priority repo definition should win
+    pkg_def = catalogue.get_package_definition("common-app")
+    assert pkg_def["name"] == "CommonAppB"
+    assert pkg_def["version"] == "2.0.0"
+
+
+def test_cli_repo_priority_commands(temp_aster_env, capsys):
+    config = temp_aster_env
+
+    # 1. Add repo with priority flag
+    assert main(["repo", "add", "custom-repo", "http://example.com/repo", "-p", "150"]) == 0
+    repos_data = config.load_json(config.repositories_json)
+    assert repos_data["repositories"]["custom-repo"]["priority"] == 150
+
+    # 2. List repos
+    assert main(["repo", "list"]) == 0
+    captured = capsys.readouterr()
+    assert "custom-repo" in captured.out
+    assert "150" in captured.out
+
+    # 3. Modify repo priority with set-priority
+    assert main(["repo", "set-priority", "custom-repo", "300"]) == 0
+    repos_data = config.load_json(config.repositories_json)
+    assert repos_data["repositories"]["custom-repo"]["priority"] == 300
+
+    # 4. Set priority for non-existent repo should return error code
+    assert main(["repo", "set-priority", "nonexistent-repo", "200"]) == 1
