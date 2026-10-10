@@ -74,9 +74,14 @@ def create_parser() -> argparse.ArgumentParser:
     repo_add = repo_subparsers.add_parser("add", help="Add a package repository")
     repo_add.add_argument("name", help="Repository name")
     repo_add.add_argument("url", help="Repository URL or path")
+    repo_add.add_argument("-p", "--priority", type=int, default=100, help="Repository priority (default: 100, higher number wins)")
 
     repo_remove = repo_subparsers.add_parser("remove", help="Remove a package repository")
     repo_remove.add_argument("name", help="Repository name")
+
+    repo_set_priority = repo_subparsers.add_parser("set-priority", help="Set priority for a package repository")
+    repo_set_priority.add_argument("name", help="Repository name")
+    repo_set_priority.add_argument("priority", type=int, help="Priority value (higher number wins)")
 
     # aster config
     config_parser = subparsers.add_parser("config", help="View or modify configuration")
@@ -317,19 +322,34 @@ def main(args: Optional[List[str]] = None) -> int:
             repos = repos_data.get("repositories", {})
 
             if parsed_args.repo_command == "list":
-                print(f"{'NAME':<15} {'URL'}")
-                print("-" * 50)
-                for name, info in repos.items():
-                    print(f"{name:<15} {info.get('url')}")
+                print(f"{'NAME':<15} {'PRIORITY':<10} {'URL'}")
+                print("-" * 65)
+                sorted_repos = catalogue.get_sorted_repositories()
+                for name, info in sorted_repos:
+                    prio = info.get("priority", 100)
+                    print(f"{name:<15} {prio:<10} {info.get('url')}")
                 return 0
             elif parsed_args.repo_command == "add":
                 r_name = parsed_args.name
                 r_url = parsed_args.url
-                repos[r_name] = {"name": r_name, "url": r_url}
+                r_prio = parsed_args.priority
+                repos[r_name] = {"name": r_name, "url": r_url, "priority": r_prio}
                 repos_data["repositories"] = repos
                 config.save_json_atomic(config.repositories_json, repos_data)
-                print(f"Repository '{r_name}' added successfully.")
+                print(f"Repository '{r_name}' added successfully with priority {r_prio}.")
                 return 0
+            elif parsed_args.repo_command == "set-priority":
+                r_name = parsed_args.name
+                r_prio = parsed_args.priority
+                if r_name in repos:
+                    repos[r_name]["priority"] = r_prio
+                    repos_data["repositories"] = repos
+                    config.save_json_atomic(config.repositories_json, repos_data)
+                    print(f"Set priority of repository '{r_name}' to {r_prio}.")
+                    return 0
+                else:
+                    print(f"Repository '{r_name}' not found.")
+                    return 1
             elif parsed_args.repo_command == "remove":
                 r_name = parsed_args.name
                 if r_name in repos:

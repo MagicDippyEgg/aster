@@ -7,7 +7,7 @@ import json
 import urllib.request
 import urllib.error
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Tuple
 from aster.config import AsterConfig, fetch_url
 from aster.schema import validate_index, validate_package_definition
 
@@ -20,6 +20,24 @@ class CatalogueManager:
         """Loads configured catalogue repositories from repositories.json."""
         data = self.config.load_json(self.config.repositories_json)
         return data.get("repositories", {})
+
+    def get_sorted_repositories(self) -> List[Tuple[str, Dict[str, Any]]]:
+        """
+        Returns list of (repo_name, repo_info) tuples sorted by priority in descending order.
+        Higher priority number wins. Defaults to 100 if priority is omitted or invalid.
+        """
+        repos = self.get_repositories()
+        def get_priority(item):
+            repo_info = item[1]
+            p = repo_info.get("priority", 100)
+            if not isinstance(p, (int, float)):
+                try:
+                    p = int(p)
+                except (ValueError, TypeError):
+                    p = 100
+            return p
+
+        return sorted(repos.items(), key=get_priority, reverse=True)
 
     def update_repository(self, repo_name: str = "default") -> dict:
         """
@@ -84,18 +102,22 @@ class CatalogueManager:
 
     def search_packages(self, query: str = "") -> Dict[str, dict]:
         """
-        Searches across cached indexes of all repositories.
+        Searches across cached indexes of all repositories in descending priority order.
         Returns a dict mapping package_id to summary metadata.
+        Higher priority repositories win when multiple repos define the same package ID.
         """
         query_lower = query.lower() if query else ""
         results = {}
-        repos = self.get_repositories()
-        for repo_name in repos:
+        sorted_repos = self.get_sorted_repositories()
+        for repo_name, repo_info in sorted_repos:
             index = self.get_cached_index(repo_name)
             if not index:
                 continue
             pkgs = index.get("packages", {})
             for pkg_id, pkg_info in pkgs.items():
+                if pkg_id in results:
+                    # Higher priority repository already added this package
+                    continue
                 if not query_lower or query_lower in pkg_id.lower() or query_lower in pkg_info.get("description", "").lower():
                     entry = dict(pkg_info)
                     entry["repository"] = repo_name
@@ -105,14 +127,16 @@ class CatalogueManager:
     def get_package_definition(self, package_id: str, repo_name: Optional[str] = None) -> Optional[dict]:
         """
         Fetches package definition JSON for package_id.
+        Checks repositories in descending priority order (or target repo_name if provided).
         First checks cached files, or fetches from repository URL.
         """
         repos = self.get_repositories()
-        target_repos = [repo_name] if repo_name else list(repos.keys())
+        if repo_name:
+            target_repo_tuples = [(repo_name, repos[repo_name])] if repo_name in repos else []
+        else:
+            target_repo_tuples = self.get_sorted_repositories()
 
-        for rname in target_repos:
-            if rname not in repos:
-                continue
+        for rname, _ in target_repo_tuples:
             index = self.get_cached_index(rname)
             if not index or package_id not in index.get("packages", {}):
                 continue

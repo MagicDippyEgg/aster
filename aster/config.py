@@ -242,7 +242,8 @@ class AsterConfig:
                 "repositories": {
                     "default": {
                         "name": "default",
-                        "url": "https://raw.githubusercontent.com/MagicDippyEgg/aster-package-repository/main"
+                        "url": "https://raw.githubusercontent.com/MagicDippyEgg/aster-package-repository/main",
+                        "priority": 100
                     }
                 }
             }
