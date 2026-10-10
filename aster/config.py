@@ -54,7 +54,7 @@ def fetch_url(url: str, headers: dict = None, timeout: int = 15) -> bytes:
     Safely fetches bytes from a URL using SSL certificate verification.
     """
     if headers is None:
-        headers = {"User-Agent": "Aster-PackageManager/0.1.0"}
+        headers = {"User-Agent": "Aster-PackageManager/0.1.1"}
 
     req = urllib.request.Request(url, headers=headers)
     ssl_ctx = get_ssl_context()
