@@ -1,0 +1,29 @@
+[package]
+name = "aster"
+version = "0.2.0"
+edition = "2021"
+description = "Aster Package Manager - Independent Linux Package Manager"
+license = "MIT"
+
+[[bin]]
+name = "aster"
+path = "src/main.rs"
+
+[lib]
+name = "aster"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-native-roots"] }
+tar = "0.4"
+flate2 = "1"
+xz2 = "0.1"
+zip = "2"
+sha2 = "0.10"
+regex = "1"
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"

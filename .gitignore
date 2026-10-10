@@ -1,4 +1,2 @@
-__pycache__/
-*.pyc
-.pytest_cache/
-*.egg-info/
+/target
+**/*.rs.bk
