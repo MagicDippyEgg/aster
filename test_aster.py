@@ -444,6 +444,65 @@ def test_cargo_detection_system_vs_isolated(temp_aster_env, monkeypatch, tmp_pat
     assert "RUSTUP_HOME" not in build_env_used or build_env_used["RUSTUP_HOME"] != str(config.rust_toolchain_dir)
     assert "CARGO_HOME" not in build_env_used or build_env_used["CARGO_HOME"] != str(config.rust_toolchain_dir)
 
+def test_install_tar_xz_binary_and_source(temp_aster_env, tmp_path):
+    config = temp_aster_env
+    registry = RegistryManager(config)
+    catalogue = CatalogueManager(config)
+    installer = PackageInstaller(config, registry, catalogue)
+
+    # 1. Test binary package with .tar.xz
+    bin_exe = tmp_path / "xzbin"
+    bin_exe.write_text("#!/bin/sh\necho xzbin")
+    bin_exe.chmod(0o755)
+
+    bin_tar_xz = tmp_path / "xzbin-1.0.0.tar.xz"
+    with tarfile.open(bin_tar_xz, "w:xz") as tar:
+        tar.add(bin_exe, arcname="bin/xzbin")
+
+    bin_pkg_def = {
+        "schema_version": 1,
+        "id": "xzbin-bin",
+        "name": "XZBin",
+        "version": "1.0.0",
+        "type": "binary",
+        "downloads": {
+            "linux-x86_64": {"url": f"file://{bin_tar_xz}"},
+            "linux-aarch64": {"url": f"file://{bin_tar_xz}"}
+        }
+    }
+
+    installer._install_binary(bin_pkg_def)
+    assert registry.is_installed("xzbin-bin")
+    assert (config.bin_dir / "xzbin").exists()
+
+    # 2. Test source package with .tar.xz
+    src_dir = tmp_path / "xz_src"
+    src_dir.mkdir()
+    (src_dir / "Makefile").write_text("all:\n\t@echo 'xz src complete'\ninstall:\n\tmkdir -p $(DESTDIR)/bin\n\techo '#!/bin/sh' > $(DESTDIR)/bin/xzsrc\n\tchmod +x $(DESTDIR)/bin/xzsrc\n")
+
+    src_tar_xz = tmp_path / "xzsrc-1.0.0.tar.xz"
+    with tarfile.open(src_tar_xz, "w:xz") as tar:
+        tar.add(src_dir / "Makefile", arcname="Makefile")
+
+    src_pkg_def = {
+        "schema_version": 1,
+        "id": "xzsrc-src",
+        "name": "XZSrc",
+        "version": "1.0.0",
+        "type": "source",
+        "source": {
+            "type": "tar.xz",
+            "url": f"file://{src_tar_xz}"
+        },
+        "build": {
+            "system": "make"
+        }
+    }
+
+    installer._install_source(src_pkg_def, auto_yes=True)
+    assert registry.is_installed("xzsrc-src")
+    assert (config.bin_dir / "xzsrc").exists()
+
 def test_cleanup_on_failure(temp_aster_env):
     config = temp_aster_env
     registry = RegistryManager(config)

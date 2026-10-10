@@ -210,10 +210,18 @@ class PackageInstaller:
             if not archive_format:
                 if download_filename.endswith(".tar.gz") or download_filename.endswith(".tgz"):
                     archive_format = "tar.gz"
+                elif download_filename.endswith(".tar.xz") or download_filename.endswith(".txz"):
+                    archive_format = "tar.xz"
                 elif download_filename.endswith(".zip"):
                     archive_format = "zip"
 
-            if str(dest_archive).endswith(".tar.gz") or str(dest_archive).endswith(".tgz") or archive_format == "tar.gz":
+            if (
+                str(dest_archive).endswith(".tar.gz")
+                or str(dest_archive).endswith(".tgz")
+                or str(dest_archive).endswith(".tar.xz")
+                or str(dest_archive).endswith(".txz")
+                or archive_format in ("tar.gz", "tar.xz")
+            ):
                 with tarfile.open(dest_archive, "r:*") as tar:
                     # Security path traversal check
                     for member in tar.getmembers():
@@ -339,8 +347,14 @@ class PackageInstaller:
                     res = subprocess.run(cmd, capture_output=True, text=True, env=build_env)
                     if res.returncode != 0:
                         raise RuntimeError(f"Git clone failed for '{pkg_id}': {res.stderr}")
-            elif src_type in ("tar.gz", "zip", "archive", "url"):
-                dest_archive = self.config.downloads_cache / (f"{pkg_id}.zip" if src_type == "zip" or src_url.endswith(".zip") else f"{pkg_id}.tar.gz")
+            elif src_type in ("tar.gz", "tar.xz", "txz", "zip", "archive", "url"):
+                if src_type == "zip" or src_url.endswith(".zip"):
+                    ext = ".zip"
+                elif src_type in ("tar.xz", "txz") or src_url.endswith(".tar.xz") or src_url.endswith(".txz"):
+                    ext = ".tar.xz"
+                else:
+                    ext = ".tar.gz"
+                dest_archive = self.config.downloads_cache / f"{pkg_id}{ext}"
                 if src_url.startswith("http://") or src_url.startswith("https://"):
                     fetch_url_to_file(src_url, dest_archive, timeout=30)
                 elif src_url.startswith("file://"):
