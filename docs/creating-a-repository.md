@@ -7,20 +7,20 @@ This guide provides a complete, in-depth reference for creating, structuring, an
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [Repository Layout](#repository-layout)
+2. [Repository Directory Layout](#repository-directory-layout)
 3. [The Repository Index (`index.json`)](#1-the-repository-index-indexjson)
 4. [Package Definition Schemas](#2-package-definition-schemas)
-   - [Common Fields](#common-fields)
-   - [Binary Packages (`"type": "binary"`)](#binary-packages-type-binary)
-   - [Source Packages (`"type": "source"`)](#source-packages-type-source)
+   - [Common Core Fields](#common-core-fields)
+   - [Binary Package Definitions (`"type": "binary"`)](#binary-package-definitions-type-binary)
+   - [Source Package Definitions (`"type": "source"`)](#source-package-definitions-type-source)
 5. [Source Acquisition Types](#3-source-acquisition-types)
    - [Git Repositories](#git-repositories)
-   - [Archives and File Downloads](#archives-and-file-downloads)
-6. [Build Systems and Custom Steps](#4-build-systems-and-custom-steps)
-   - [Cargo Build System](#cargo-rust)
-   - [CMake Build System](#cmake)
-   - [Make Build System](#make)
-   - [Custom Scripted Steps](#custom-scripted-steps)
+   - [Source Archives and HTTP Downloads](#source-archives-and-http-downloads)
+6. [Build System Configurations](#4-build-system-configurations)
+   - [Cargo (Rust)](#cargo-rust)
+   - [CMake](#cmake)
+   - [Make](#make)
+   - [Custom Scripted Build Steps](#custom-scripted-build-steps)
 7. [Dependencies & Executable Resolution](#5-dependencies--executable-resolution)
 8. [Hosting a Repository](#6-hosting-a-repository)
 9. [Adding and Managing Repositories in Aster](#7-adding-and-managing-repositories-in-aster)
@@ -29,28 +29,30 @@ This guide provides a complete, in-depth reference for creating, structuring, an
 
 ## Overview
 
-An Aster repository is an HTTP/HTTPS web service or a local directory tree containing:
-1. `index.json`: A single JSON catalog listing all available packages, their package types, brief descriptions, and relative paths to their full package definitions.
+An Aster repository is an HTTP/HTTPS web service or local directory tree containing:
+1. `index.json`: A single JSON catalog listing all available packages, their package types, brief descriptions, and relative file paths to their full package definitions.
 2. `packages/`: A subdirectory containing individual JSON package definitions (`<package-id>.json`).
 
-When a user runs `aster repo update`, Aster downloads and caches `index.json`. When installing a specific package, Aster fetches that package's JSON definition on demand.
+When a user runs `aster repo update`, Aster fetches and caches `index.json`. When installing a package, Aster retrieves that package's JSON definition file on demand.
 
 ---
 
-## Repository Layout
+## Repository Directory Layout
 
-A typical Aster package repository structured like `aster-package-repository` follows this hierarchy:
+An Aster package repository (such as `aster-package-repository`) follows this hierarchy:
 
 ```text
 aster-package-repository/
 ├── index.json
 ├── packages/
+│   ├── bat-bin.json
 │   ├── fastfetch-bin.json
 │   ├── fastfetch-src.json
 │   ├── eza-bin.json
 │   ├── eza-src.json
-│   ├── tree-src.json
-│   ├── jq-src.json
+│   ├── glow-src.json
+│   ├── neofetch-src.json
+│   ├── yazi-src.json
 │   └── ...
 └── README.md
 ```
@@ -70,7 +72,7 @@ The `index.json` file resides at the root of the repository.
     "<package_id>": {
       "definition": "packages/<package_id>.json",
       "type": "binary" | "source",
-      "description": "Brief description of the package"
+      "description": "Short description of the package"
     }
   }
 }
@@ -79,9 +81,9 @@ The `index.json` file resides at the root of the repository.
 ### Field Specifications
 
 - `schema_version` (*integer*, required): Must be `1`.
-- `packages` (*object*, required): Map of unique package IDs to metadata entries.
-  - `definition` (*string*, required): Relative path to the package JSON file (e.g., `"packages/fastfetch-bin.json"`).
-  - `type` (*string*, required): `"binary"` for precompiled binaries or `"source"` for source builds.
+- `packages` (*object*, required): A map where each key is a unique package identifier (e.g. `fastfetch-bin` or `eza-src`), and the value is an object containing:
+  - `definition` (*string*, required): Relative path from the repository root to the package definition file (e.g. `"packages/fastfetch-bin.json"`).
+  - `type` (*string*, required): Either `"binary"` (precompiled release) or `"source"` (compiled locally).
   - `description` (*string*, optional): A short summary displayed in `aster search` results.
 
 ### Example `index.json`
@@ -90,20 +92,20 @@ The `index.json` file resides at the root of the repository.
 {
     "schema_version": 1,
     "packages": {
-        "fastfetch-bin": {
-            "definition": "packages/fastfetch-bin.json",
+        "bat-bin": {
+            "definition": "packages/bat-bin.json",
             "type": "binary",
-            "description": "An opinionated, fast and lightweight system information tool"
+            "description": "A cat(1) clone with syntax highlighting and Git integration"
         },
         "eza-src": {
             "definition": "packages/eza-src.json",
             "type": "source",
             "description": "A modern, maintained replacement for ls (source build)"
         },
-        "jq-src": {
-            "definition": "packages/jq-src.json",
+        "fastfetch-src": {
+            "definition": "packages/fastfetch-src.json",
             "type": "source",
-            "description": "Command-line JSON processor (source build)"
+            "description": "An opinionated, fast and lightweight system information tool (source build)"
         }
     }
 }
@@ -113,57 +115,57 @@ The `index.json` file resides at the root of the repository.
 
 ## 2. Package Definition Schemas
 
-Every JSON definition file in `packages/` contains the full specification for a package.
+Each package definition file in `packages/` is a standalone JSON document describing a package's metadata, download locations, source options, and build instructions.
 
-### Common Fields
+### Common Core Fields
 
-All package definitions require these top-level fields:
+Every package definition (binary or source) must contain these top-level fields:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `schema_version` | Integer | Yes | Must be `1`. |
-| `id` | String | Yes | Non-empty string matching the package key in `index.json`. |
-| `name` | String | Yes | Human-readable package name (e.g. `"Fastfetch"` or `"eza"`). |
-| `version` | String | Yes | Package release version (e.g. `"2.69.0"` or `"0.18.2"`). |
+| `id` | String | Yes | Unique package identifier matching the key in `index.json` (e.g. `"bat-bin"` or `"eza-src"`). |
+| `name` | String | Yes | Human-readable package name (e.g. `"bat"` or `"eza"`). |
+| `version` | String | Yes | Release version string (e.g. `"0.26.1"` or `"0.23.5"`). |
 | `type` | String | Yes | `"binary"` or `"source"`. |
 | `description` | String | No | Detailed package description. |
-| `homepage` | String | No | URL to the project website or repository. |
-| `dependencies` | Array of Strings | No | Package IDs of runtime or build dependencies. |
+| `homepage` | String | No | Project website or code repository URL. |
+| `dependencies` | Array of Strings | No | List of prerequisite package IDs required prior to installation. |
 
 ---
 
-### Binary Packages (`"type": "binary"`)
+### Binary Package Definitions (`"type": "binary"`)
 
-Binary package definitions specify download locations for precompiled release archives across target architectures.
+Binary packages provide pre-built binaries packed inside release archives.
 
-#### Fields
+#### Binary Fields
 
-- `downloads` (*object*, required): A mapping from target platform keys to download metadata objects.
-  - Platform Key Format: `<os>-<arch>` (e.g., `linux-x86_64`, `linux-aarch64`, `darwin-x86_64`, `darwin-aarch64`).
-  - `url` (*string*, required): Download URL for the archive or executable (`.tar.gz`, `.tgz`, `.tar.xz`, `.txz`, `.zip`, or direct binary download).
-  - `sha256` (*string*, optional): SHA-256 hash for checksum validation.
-- `supported_platforms` (*array of strings*, optional): List of platform keys supported by this package (e.g., `["linux-x86_64", "linux-aarch64"]`).
-- `archive.format` (*string*, optional): Explicit archive format (`"tar.gz"`, `"tar.xz"`, `"zip"`). Inferred automatically from URL extensions if omitted.
+- `downloads` (*object*, required): A dictionary mapping system platform keys to download details.
+  - Platform Keys: Standard `<os>-<arch>` strings (e.g., `linux-x86_64`, `linux-aarch64`, `darwin-x86_64`, `darwin-aarch64`).
+  - `url` (*string*, required): Direct download link for the release archive (`.tar.gz`, `.tgz`, `.tar.xz`, `.txz`, `.zip`) or executable file.
+  - `sha256` (*string*, optional): SHA-256 hash used to verify archive integrity.
+- `supported_platforms` (*array of strings*, optional): List of platform keys supported by this binary build.
+- `archive.format` (*string*, optional): Explicit archive format (`"tar.gz"`, `"tar.xz"`, `"zip"`). If omitted, format is inferred automatically from file extension.
 
-#### Binary Package Example (`packages/fastfetch-bin.json`)
+#### Binary Example (`packages/bat-bin.json`)
 
 ```json
 {
     "schema_version": 1,
-    "id": "fastfetch-bin",
-    "name": "Fastfetch",
-    "version": "2.69.0",
+    "id": "bat-bin",
+    "name": "bat",
+    "version": "0.26.1",
     "type": "binary",
-    "description": "An opinionated, fast and lightweight system information tool",
-    "homepage": "https://github.com/fastfetch-cli/fastfetch",
+    "description": "A cat(1) clone with syntax highlighting and Git integration",
+    "homepage": "https://github.com/sharkdp/bat",
     "downloads": {
         "linux-x86_64": {
-            "url": "https://github.com/fastfetch-cli/fastfetch/releases/download/2.69.0/fastfetch-linux-amd64.tar.gz",
-            "sha256": "9fe880a34de3fec88e57a69230c02fd7be0846db3f3ea9f88f2b74489a79ff55"
+            "url": "https://github.com/sharkdp/bat/releases/download/v0.26.1/bat-v0.26.1-x86_64-unknown-linux-musl.tar.gz",
+            "sha256": "0dcd8ac79732c0d5b136f11f4ee00e581440e16a44eab5b3105b611bbf2cf191"
         },
         "linux-aarch64": {
-            "url": "https://github.com/fastfetch-cli/fastfetch/releases/download/2.69.0/fastfetch-linux-aarch64.tar.gz",
-            "sha256": "843a0d4e3d604efc7cce18df1efcc09b00a1960cfea9949118b50bf999694027"
+            "url": "https://github.com/sharkdp/bat/releases/download/v0.26.1/bat-v0.26.1-aarch64-unknown-linux-musl.tar.gz",
+            "sha256": "6369242c584065f195fb20cb36fbd7cb63ae690605bbe89868a7596b596c2c23"
         }
     },
     "supported_platforms": [
@@ -175,21 +177,21 @@ Binary package definitions specify download locations for precompiled release ar
 
 ---
 
-### Source Packages (`"type": "source"`)
+### Source Package Definitions (`"type": "source"`)
 
-Source package definitions specify how Aster retrieves source code and compiles it locally.
+Source package definitions describe how to fetch source code and compile it locally.
 
-#### Core Fields
+#### Source Fields
 
-- `source` (*object*, required): Source code retrieval settings (see [Source Acquisition Types](#3-source-acquisition-types)).
-- `build` (*object*, required): Build configuration (see [Build Systems](#4-build-systems-and-custom-steps)).
-- `executables` (*array of strings* or *string*, optional): List of specific executable names produced by the build to symlink into Aster's binary directory.
+- `source` (*object*, required): Source retrieval specification (see [Source Acquisition Types](#3-source-acquisition-types)).
+- `build` (*object*, required): Compilation settings (see [Build System Configurations](#4-build-system-configurations)).
+- `executables` (*array of strings* or *string*, optional): Explicit list of executable names produced by the build to symlink into `~/.bin/aster/bin/`.
 
 ---
 
 ## 3. Source Acquisition Types
 
-The `source` object supports multiple methods for obtaining source code:
+The `source` object configures how Aster downloads or clones the source code prior to building.
 
 ### Git Repositories
 
@@ -197,73 +199,75 @@ The `source` object supports multiple methods for obtaining source code:
 "source": {
     "type": "git",
     "url": "https://github.com/eza-community/eza.git",
-    "ref": "v0.18.2"
+    "ref": "v0.23.5"
 }
 ```
 
 - `type`: `"git"`
-- `url`: Git repository clone URL (`https://...` or `git@...`).
-- `ref`: Tag, branch, or commit hash to checkout (defaults to `"main"` if omitted).
+- `url`: Git repository URL.
+- `ref`: Commit tag, branch name, or full SHA-1 hash to check out (defaults to `"main"` if omitted).
 
-### Archives and File Downloads
-
-Source archives can be fetched via tarballs or zip files:
+### Source Archives and HTTP Downloads
 
 ```json
 "source": {
     "type": "tar.gz",
-    "url": "https://github.com/pking543/tree/archive/refs/tags/2.1.1.tar.gz"
+    "url": "https://github.com/dylanaraps/neofetch/archive/refs/tags/7.1.0.tar.gz"
 }
 ```
 
-Supported `type` values for archives:
+Supported `type` strings for archives:
 - `"tar.gz"`, `"tar.xz"`, `"txz"`, `"zip"`, `"archive"`, `"url"`
 
 ---
 
-## 4. Build Systems and Custom Steps
+## 4. Build System Configurations
 
-The `build` object configures how Aster compiles the package.
+The `build` object defines how Aster compiles the software.
 
 ### Cargo (Rust)
 
-Aster has native integration with Cargo. If Rust is not installed on the host system, Aster can download an isolated, cached Rust toolchain automatically.
+For Rust projects, Aster offers native Cargo integration. If Rust/Cargo is not present on the host system, Aster can download an isolated, cached Rust toolchain automatically.
 
 ```json
 "build": {
-    "system": "cargo"
+    "system": "cargo",
+    "release": true,
+    "locked": true
 }
 ```
 
 #### Cargo Options
 
-- `release` (*boolean*, optional, default `true`): Builds with `--release`.
-- `locked` (*boolean*, optional, default `false`): Passes `--locked` to cargo build.
-- `cargo_args` (*array of strings*, optional): Replaces default `cargo build --release` flags with custom arguments.
-- `executables` (*array of strings*, optional): Names of target binaries produced inside `target/release/`.
+- `system`: `"cargo"`
+- `release` (*boolean*, optional, default `true`): Builds using `cargo build --release`.
+- `locked` (*boolean*, optional, default `false`): Appends `--locked` to cargo invocations.
+- `cargo_args` (*array of strings*, optional): Replaces default `cargo build` flags with custom arguments.
+- `executables` (*array of strings*, optional): Target binaries produced inside `target/release/`.
 
-#### Example: Cargo Source Package (`packages/yazi-src.json`)
+#### Cargo Example (`packages/eza-src.json`)
 
 ```json
 {
     "schema_version": 1,
-    "id": "yazi-src",
-    "name": "Yazi",
-    "version": "25.2.26",
+    "id": "eza-src",
+    "name": "eza",
+    "version": "0.23.5",
     "type": "source",
-    "description": "Blazing fast terminal file manager written in Rust (source build)",
-    "homepage": "https://github.com/sxyazi/yazi",
+    "description": "A modern, maintained replacement for ls (source build)",
+    "homepage": "https://eza.rocks",
     "source": {
         "type": "git",
-        "url": "https://github.com/sxyazi/yazi.git",
-        "ref": "v25.2.26"
+        "url": "https://github.com/eza-community/eza.git",
+        "ref": "v0.23.5"
     },
     "build": {
-        "system": "cargo"
+        "system": "cargo",
+        "release": true,
+        "locked": true
     },
     "executables": [
-        "yazi",
-        "ya"
+        "eza"
     ]
 }
 ```
@@ -272,7 +276,7 @@ Aster has native integration with Cargo. If Rust is not installed on the host sy
 
 ### CMake
 
-Invokes CMake to configure, build, and install into Aster's staging directory.
+Configures CMake to build and install into Aster's package staging directory.
 
 ```json
 "build": {
@@ -280,7 +284,7 @@ Invokes CMake to configure, build, and install into Aster's staging directory.
 }
 ```
 
-#### Example: CMake Source Package (`packages/fastfetch-src.json`)
+#### CMake Example (`packages/fastfetch-src.json`)
 
 ```json
 {
@@ -306,7 +310,7 @@ Invokes CMake to configure, build, and install into Aster's staging directory.
 
 ### Make
 
-Invokes `make` followed by `make DESTDIR=... install`.
+Runs `make` followed by `make DESTDIR=... install`.
 
 ```json
 "build": {
@@ -314,21 +318,21 @@ Invokes `make` followed by `make DESTDIR=... install`.
 }
 ```
 
-#### Example: Make Source Package (`packages/tree-src.json`)
+#### Make Example (`packages/neofetch-src.json`)
 
 ```json
 {
     "schema_version": 1,
-    "id": "tree-src",
-    "name": "tree",
-    "version": "2.2.1",
+    "id": "neofetch-src",
+    "name": "neofetch",
+    "version": "7.1.0",
     "type": "source",
-    "description": "Recursive directory listing program (source build)",
-    "homepage": "https://oldmanhook.github.io/unix-tree/",
+    "description": "A command-line system information tool written in bash 3.2+ (source build)",
+    "homepage": "https://github.com/dylanaraps/neofetch",
     "source": {
         "type": "git",
-        "url": "https://github.com/oldmanhook/unix-tree.git",
-        "ref": "2.2.1"
+        "url": "https://github.com/dylanaraps/neofetch.git",
+        "ref": "7.1.0"
     },
     "build": {
         "system": "make"
@@ -338,42 +342,39 @@ Invokes `make` followed by `make DESTDIR=... install`.
 
 ---
 
-### Custom Scripted Steps
+### Custom Scripted Build Steps
 
-For builds requiring custom commands (e.g. Go builds, Autotools, shell scripts), specify an array of shell command strings under `build.steps`.
+For projects built using Go, Autotools, shell scripts, or custom toolchains, define a list of shell command strings under `build.steps`.
 
-*Note: Custom build steps require interactive confirmation during `aster install` unless the `-y` or `--yes` flag is provided.*
+*Note: Packages defining custom `build.steps` will prompt for interactive confirmation during `aster install` unless the `-y` or `--yes` flag is supplied.*
 
 ```json
 "build": {
     "steps": [
-        "autoreconf -i",
-        "./configure --prefix=$ASTER_HOME/packages/jq-src",
-        "make -j$(nproc)",
-        "make install"
+        "go build -v -o glow"
     ]
 }
 ```
 
-#### Example: Custom Go Build Steps (`packages/jq-src.json` / `packages/glow-src.json`)
+#### Custom Steps Example (`packages/glow-src.json`)
 
 ```json
 {
     "schema_version": 1,
     "id": "glow-src",
-    "name": "Glow",
-    "version": "2.1.0",
+    "name": "glow",
+    "version": "3.0.0",
     "type": "source",
     "description": "Render markdown on the CLI, with pizzazz! (source build)",
     "homepage": "https://github.com/charmbracelet/glow",
     "source": {
         "type": "git",
         "url": "https://github.com/charmbracelet/glow.git",
-        "ref": "v2.1.0"
+        "ref": "v3.0.0"
     },
     "build": {
         "steps": [
-            "go build -o glow"
+            "go build -v -o glow"
         ]
     }
 }
@@ -383,9 +384,9 @@ For builds requiring custom commands (e.g. Go builds, Autotools, shell scripts),
 
 ## 5. Dependencies & Executable Resolution
 
-### Dependencies
+### Dependency Resolution
 
-Declare runtime or build dependencies in the `dependencies` array:
+Packages can specify runtime or build dependencies using the `dependencies` array:
 
 ```json
 "dependencies": [
@@ -393,26 +394,26 @@ Declare runtime or build dependencies in the `dependencies` array:
 ]
 ```
 
-Aster resolves and installs dependencies before installing the target package.
+Aster automatically resolves dependencies recursively and installs missing prerequisites prior to building or installing the target package.
 
-### Executable Resolution
+### Executable Link Discovery
 
-When a package is installed:
-1. Aster inspects `executables` in the package definition. If specified, only those named binaries are symlinked into `~/.bin/aster/bin/`.
-2. For binary archives or source builds without explicit `executables`, Aster discovers executables placed inside `bin/` or `usr/bin/` within the package staging directory.
+When a package installation completes:
+1. If `executables` is declared in the JSON definition, Aster symlinks only those specific binary files into `~/.bin/aster/bin/`.
+2. If `executables` is omitted, Aster automatically discovers executable files installed under staging directories like `bin/`, `usr/bin/`, or `local/bin/`.
 
 ---
 
 ## 6. Hosting a Repository
 
-An Aster repository can be hosted on any static HTTP/HTTPS web server or Git host (such as GitHub, GitLab, Sourcehut, or Gitea).
+An Aster package repository can be hosted on any static web server or Git hosting platform (such as GitHub, GitLab, Sourcehut, or Gitea).
 
 ### Hosting on GitHub
 
-1. Create a repository on GitHub (e.g. `my-user/aster-repo`).
-2. Push `index.json` and your `packages/*.json` files to the `main` branch.
-3. Use the raw content base URL:
-   `https://raw.githubusercontent.com/my-user/aster-repo/main`
+1. Create a public repository (e.g. `my-user/aster-package-repository`).
+2. Add `index.json` and package definition files inside `packages/`.
+3. Obtain the raw base URL for your repository branch:
+   `https://raw.githubusercontent.com/my-user/aster-package-repository/main`
 
 ---
 
@@ -433,16 +434,14 @@ aster repo add official https://raw.githubusercontent.com/MagicDippyEgg/aster-pa
 ### Adding a Local Repository
 
 ```sh
-aster repo add my-local file:///home/user/my-aster-repo --priority 200
+aster repo add local-dev file:///path/to/local/aster-package-repository --priority 200
 ```
 
-### Repository Priority
+### Repository Priorities
 
-Repositories have a priority value (default: `100`). Higher values take precedence when resolving packages with identical IDs across multiple repositories.
+Repository priority defaults to `100`. When multiple repositories offer a package with the same `id`, the repository with the highest priority score takes precedence during package resolution and installation.
 
-### Updating Repository Catalogs
-
-To pull the latest index files from all configured repositories:
+### Refreshing Repository Catalogs
 
 ```sh
 aster repo update
