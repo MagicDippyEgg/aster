@@ -24,6 +24,10 @@ aster doctor               # check the installation for problems
 Packages and configuration live under `~/.bin/aster` by default. Set `ASTER_HOME`
 to use a different location.
 
+## Documentation
+
+- [Creating and Managing a Repository](docs/creating-a-repository.md) - A complete guide on setting up custom package repositories, package definition JSON schemas, build systems, and repository hosting.
+
 ## Development
 
 ```sh
