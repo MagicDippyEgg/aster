@@ -149,8 +149,11 @@ fn test_search_output_formatting_single_vs_multi_repo() {
     let out3 = f.run_cli(&["search", "long-app"]);
     assert_eq!(code(&out3), 0);
     let stdout3 = stdout(&out3);
-    assert!(stdout3.contains("PACKAGE ID      REPO                            TYPE       DESCRIPTION"));
-    assert!(stdout3.contains("long-app        my-extra-long-repository-name   binary     App in long repo"));
+    assert!(
+        stdout3.contains("PACKAGE ID      REPO                            TYPE       DESCRIPTION")
+    );
+    assert!(stdout3
+        .contains("long-app        my-extra-long-repository-name   binary     App in long repo"));
 }
 
 #[test]

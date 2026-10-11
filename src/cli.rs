@@ -256,7 +256,9 @@ fn search(catalogue: &CatalogueManager, query: &str) -> crate::error::Result<i32
                     .get("repository")
                     .map(py_str)
                     .unwrap_or_else(|| "default".to_string());
-                println!("{pkg_id:<pkg_id_width$} {repo:<repo_width$} {ptype:<ptype_width$} {desc}");
+                println!(
+                    "{pkg_id:<pkg_id_width$} {repo:<repo_width$} {ptype:<ptype_width$} {desc}"
+                );
             }
         } else {
             let max_pkg_len = results.keys().map(|k| k.len()).max().unwrap_or(10);
