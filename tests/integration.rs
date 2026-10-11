@@ -163,17 +163,23 @@ fn test_internal_complete() {
 
     let out_avail = f.run_cli(&["_complete", "available"]);
     assert_eq!(code(&out_avail), 0);
-    assert!(stdout(&out_avail).contains("fastfetch-bin"));
+    let stdout_avail = stdout(&out_avail);
+    assert!(stdout_avail.contains("fastfetch-bin"));
+    assert!(!stdout_avail.contains('\t'));
 
     let out_repos = f.run_cli(&["_complete", "repos"]);
     assert_eq!(code(&out_repos), 0);
-    assert!(stdout(&out_repos).contains("default"));
+    let stdout_repos = stdout(&out_repos);
+    assert!(stdout_repos.contains("default"));
+    assert!(!stdout_repos.contains('\t'));
 
     f.installer().install("fastfetch-bin", true).unwrap();
 
     let out_inst = f.run_cli(&["_complete", "installed"]);
     assert_eq!(code(&out_inst), 0);
-    assert!(stdout(&out_inst).contains("fastfetch-bin"));
+    let stdout_inst = stdout(&out_inst);
+    assert!(stdout_inst.contains("fastfetch-bin"));
+    assert!(!stdout_inst.contains('\t'));
 }
 
 #[test]
@@ -186,9 +192,9 @@ fn test_completions_fish() {
     assert!(stdout_str.contains("install"));
     assert!(stdout_str.contains("remove"));
     assert!(stdout_str.contains("search"));
-    assert!(stdout_str.contains("aster _complete available"));
-    assert!(stdout_str.contains("aster _complete installed"));
-    assert!(stdout_str.contains("aster _complete repos"));
+    assert!(stdout_str.contains("-f -a \"(aster _complete available 2>/dev/null)\""));
+    assert!(stdout_str.contains("-f -a \"(aster _complete installed 2>/dev/null)\""));
+    assert!(stdout_str.contains("-f -a \"(aster _complete repos 2>/dev/null)\""));
     assert!(!stdout_str.contains("-a \"_complete\""));
 }
 
