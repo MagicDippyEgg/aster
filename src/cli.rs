@@ -218,12 +218,30 @@ fn search(catalogue: &CatalogueManager, query: &str) -> crate::error::Result<i32
     if results.is_empty() {
         println!("No packages found matching '{query}'.");
     } else {
-        println!("{:<20} {:<10} DESCRIPTION", "PACKAGE ID", "TYPE");
-        println!("{}", "-".repeat(65));
-        for (pkg_id, info) in results.iter() {
-            let desc = info.get("description").map(py_str).unwrap_or_default();
-            let ptype = info.get("type").map(py_str).unwrap_or_default();
-            println!("{pkg_id:<20} {ptype:<10} {desc}");
+        let multi_repo = catalogue.get_repositories()?.len() > 1;
+        if multi_repo {
+            println!(
+                "{:<15} {:<8} {:<10} DESCRIPTION",
+                "PACKAGE ID", "REPO", "TYPE"
+            );
+            println!("{}", "-".repeat(65));
+            for (pkg_id, info) in results.iter() {
+                let desc = info.get("description").map(py_str).unwrap_or_default();
+                let ptype = info.get("type").map(py_str).unwrap_or_default();
+                let repo = info
+                    .get("repository")
+                    .map(py_str)
+                    .unwrap_or_else(|| "default".to_string());
+                println!("{pkg_id:<15} {repo:<8} {ptype:<10} {desc}");
+            }
+        } else {
+            println!("{:<20} {:<10} DESCRIPTION", "PACKAGE ID", "TYPE");
+            println!("{}", "-".repeat(65));
+            for (pkg_id, info) in results.iter() {
+                let desc = info.get("description").map(py_str).unwrap_or_default();
+                let ptype = info.get("type").map(py_str).unwrap_or_default();
+                println!("{pkg_id:<20} {ptype:<10} {desc}");
+            }
         }
     }
     Ok(0)
