@@ -226,6 +226,11 @@ fn internal_complete(
 fn completions(shell: clap_complete::Shell) -> crate::error::Result<i32> {
     let mut cmd = Cli::command();
     cmd = filter_hidden_subcommands(cmd);
+
+    if shell == clap_complete::Shell::Fish {
+        println!("complete -c aster -f");
+    }
+
     clap_complete::generate(shell, &mut cmd, "aster", &mut std::io::stdout());
 
     if shell == clap_complete::Shell::Fish {

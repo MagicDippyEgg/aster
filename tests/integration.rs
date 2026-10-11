@@ -188,7 +188,7 @@ fn test_completions_fish() {
     let out = f.run_cli(&["completions", "fish"]);
     assert_eq!(code(&out), 0);
     let stdout_str = stdout(&out);
-    assert!(stdout_str.contains("complete -c aster"));
+    assert!(stdout_str.contains("complete -c aster -f"));
     assert!(stdout_str.contains("install"));
     assert!(stdout_str.contains("remove"));
     assert!(stdout_str.contains("search"));
