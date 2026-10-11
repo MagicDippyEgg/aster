@@ -187,7 +187,7 @@ Source package definitions describe how to fetch source code and compile it loca
 
 - `source` (*object*, required): Source retrieval specification (see [Source Acquisition Types](#3-source-acquisition-types)).
 - `build` (*object*, required): Compilation settings (see [Build System Configurations](#4-build-system-configurations)).
-- `executables` (*array of strings* or *string*, optional): List of target binary names produced by Cargo builds to copy from `target/release/` into the installation directory. *(Note: Applicable to `system: "cargo"` builds; CMake, Make, and custom scripted builds install binaries via staging directory discovery.)*
+- `executables` (*array of strings* or *string*, optional): List of target binary names produced by Cargo builds to copy from the build output directory into the installation directory. *(Note: Applicable to `system: "cargo"` builds; CMake, Make, and custom scripted builds install binaries via staging directory discovery.)*
 
 ---
 
@@ -242,10 +242,10 @@ For Rust projects, Aster offers native Cargo integration. If Rust/Cargo is not p
 #### Cargo Options
 
 - `system`: `"cargo"`
-- `release` (*boolean*, optional, default `true`): Builds using `cargo build --release`.
-- `locked` (*boolean*, optional, default `false`): Appends `--locked` to cargo invocations.
-- `cargo_args` (*array of strings*, optional): Replaces all default Cargo invocation arguments (normally `build`, `--release`, etc.). Custom arguments must build the target binaries into `target/release/` or `target/debug/` so Aster can collect them.
-- `executables` (*array of strings*, optional): Target binaries produced inside `target/release/` or `target/debug/` to copy into the package staging directory.
+- `release` (*boolean*, optional, default `true`): Determines the target profile directory. Defaults to `true`, causing Aster to look for compiled binaries in `target/release/`. If set to `false`, Aster looks in `target/debug/`.
+- `locked` (*boolean*, optional, default `false`): Appends `--locked` to cargo build invocations when `cargo_args` is not specified.
+- `cargo_args` (*array of strings*, optional): Replaces all default Cargo invocation arguments (normally `build`, `--release`, etc.). When using `cargo_args`, the custom build invocation must place the resulting executables inside the expected target profile directory (`target/release/` when `release` is `true` / omitted, or `target/debug/` when `release` is `false`).
+- `executables` (*array of strings*, optional): Target binaries produced inside the target profile directory (`target/release/` or `target/debug/`) to copy into the package staging directory.
 
 #### Cargo Example (`packages/eza-src.json`)
 
@@ -401,7 +401,7 @@ Aster automatically resolves dependencies recursively and installs missing prere
 ### Executable Link Discovery
 
 When a package installation completes:
-1. For Cargo (`system: "cargo"`) builds, if `executables` is declared in the JSON definition, Aster copies those target binaries from `target/release/` into the staging directory.
+1. For Cargo (`system: "cargo"`) builds, if `executables` is declared in the JSON definition, Aster copies those target binaries from the target profile directory (`target/release/` or `target/debug/`) into the staging directory.
 2. For all build systems (CMake, Make, custom build steps, and binary archives), Aster discovers executable files installed under conventional staging directories like `bin/`, `sbin/`, `usr/bin/`, or `usr/local/bin/` and symlinks them into `~/.bin/aster/bin/`.
 
 ---
