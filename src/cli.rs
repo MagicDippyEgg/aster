@@ -69,6 +69,11 @@ enum Commands {
         #[command(subcommand)]
         command: Option<ConfigCommand>,
     },
+    /// Generate shell completion scripts
+    Completions {
+        /// Shell to generate completions for
+        shell: clap_complete::Shell,
+    },
 }
 
 #[derive(Subcommand)]
@@ -181,7 +186,14 @@ fn dispatch(
         Commands::Upgrade { package } => upgrade(registry, catalogue, installer, &package),
         Commands::Repo { command } => repo(config, catalogue, command),
         Commands::Config { command } => config_cmd(config, command),
+        Commands::Completions { shell } => completions(shell),
     }
+}
+
+fn completions(shell: clap_complete::Shell) -> crate::error::Result<i32> {
+    let mut cmd = Cli::command();
+    clap_complete::generate(shell, &mut cmd, "aster", &mut std::io::stdout());
+    Ok(0)
 }
 
 fn list(registry: &RegistryManager) -> crate::error::Result<i32> {
