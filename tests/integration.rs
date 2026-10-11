@@ -157,6 +157,42 @@ fn test_search_output_formatting_single_vs_multi_repo() {
 }
 
 #[test]
+fn test_internal_complete() {
+    let f = Fixture::new();
+    f.catalogue().update_all().unwrap();
+
+    let out_avail = f.run_cli(&["_complete", "available"]);
+    assert_eq!(code(&out_avail), 0);
+    assert!(stdout(&out_avail).contains("fastfetch-bin"));
+
+    let out_repos = f.run_cli(&["_complete", "repos"]);
+    assert_eq!(code(&out_repos), 0);
+    assert!(stdout(&out_repos).contains("default"));
+
+    f.installer().install("fastfetch-bin", true).unwrap();
+
+    let out_inst = f.run_cli(&["_complete", "installed"]);
+    assert_eq!(code(&out_inst), 0);
+    assert!(stdout(&out_inst).contains("fastfetch-bin"));
+}
+
+#[test]
+fn test_completions_fish() {
+    let f = Fixture::new();
+    let out = f.run_cli(&["completions", "fish"]);
+    assert_eq!(code(&out), 0);
+    let stdout_str = stdout(&out);
+    assert!(stdout_str.contains("complete -c aster"));
+    assert!(stdout_str.contains("install"));
+    assert!(stdout_str.contains("remove"));
+    assert!(stdout_str.contains("search"));
+    assert!(stdout_str.contains("aster _complete available"));
+    assert!(stdout_str.contains("aster _complete installed"));
+    assert!(stdout_str.contains("aster _complete repos"));
+    assert!(!stdout_str.contains("-a \"_complete\""));
+}
+
+#[test]
 fn test_cli_full_workflow() {
     let f = Fixture::new();
 
