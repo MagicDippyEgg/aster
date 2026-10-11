@@ -202,30 +202,20 @@ fn internal_complete(
     match target {
         "available" => {
             let packages = catalogue.search_packages("")?;
-            for (pkg_id, info) in packages {
-                let desc = info.get("description").map(py_str).unwrap_or_default();
-                if desc.is_empty() {
-                    println!("{pkg_id}");
-                } else {
-                    println!("{pkg_id}\t{desc}");
-                }
+            for (pkg_id, _) in packages {
+                println!("{pkg_id}");
             }
         }
         "installed" => {
             let installed = registry.list_installed()?;
-            for (pkg_id, info) in installed {
-                let ver = info
-                    .get("version")
-                    .map(py_str)
-                    .unwrap_or_else(|| "installed".to_string());
-                println!("{pkg_id}\tInstalled ({ver})");
+            for (pkg_id, _) in installed {
+                println!("{pkg_id}");
             }
         }
         "repos" => {
             let repos = catalogue.get_repositories()?;
-            for (name, info) in repos {
-                let url = info.get("url").map(py_str).unwrap_or_default();
-                println!("{name}\t{url}");
+            for (name, _) in repos {
+                println!("{name}");
             }
         }
         _ => {}
@@ -241,13 +231,13 @@ fn completions(shell: clap_complete::Shell) -> crate::error::Result<i32> {
     if shell == clap_complete::Shell::Fish {
         println!(
             "\n# Custom dynamic completions for Aster package manager\n\
-             complete -c aster -n \"__fish_aster_using_subcommand install\" -a \"(aster _complete available 2>/dev/null)\"\n\
-             complete -c aster -n \"__fish_aster_using_subcommand info\" -a \"(aster _complete available 2>/dev/null)\"\n\
-             complete -c aster -n \"__fish_aster_using_subcommand installed\" -a \"(aster _complete available 2>/dev/null)\"\n\
-             complete -c aster -n \"__fish_aster_using_subcommand remove\" -a \"(aster _complete installed 2>/dev/null)\"\n\
-             complete -c aster -n \"__fish_aster_using_subcommand upgrade\" -a \"(aster _complete installed 2>/dev/null)\"\n\
-             complete -c aster -n \"__fish_aster_using_subcommand repo; and __fish_seen_subcommand_from remove\" -a \"(aster _complete repos 2>/dev/null)\"\n\
-             complete -c aster -n \"__fish_aster_using_subcommand repo; and __fish_seen_subcommand_from set-priority\" -a \"(aster _complete repos 2>/dev/null)\""
+             complete -c aster -n \"__fish_aster_using_subcommand install\" -f -a \"(aster _complete available 2>/dev/null)\"\n\
+             complete -c aster -n \"__fish_aster_using_subcommand info\" -f -a \"(aster _complete available 2>/dev/null)\"\n\
+             complete -c aster -n \"__fish_aster_using_subcommand installed\" -f -a \"(aster _complete available 2>/dev/null)\"\n\
+             complete -c aster -n \"__fish_aster_using_subcommand remove\" -f -a \"(aster _complete installed 2>/dev/null)\"\n\
+             complete -c aster -n \"__fish_aster_using_subcommand upgrade\" -f -a \"(aster _complete installed 2>/dev/null)\"\n\
+             complete -c aster -n \"__fish_aster_using_subcommand repo; and __fish_seen_subcommand_from remove\" -f -a \"(aster _complete repos 2>/dev/null)\"\n\
+             complete -c aster -n \"__fish_aster_using_subcommand repo; and __fish_seen_subcommand_from set-priority\" -f -a \"(aster _complete repos 2>/dev/null)\""
         );
     }
     Ok(0)
