@@ -120,6 +120,37 @@ fn test_search_output_formatting_single_vs_multi_repo() {
     let stdout2 = stdout(&out2);
     assert!(stdout2.contains("PACKAGE ID      REPO     TYPE       DESCRIPTION"));
     assert!(stdout2.contains("fastfetch-bin   repo-b   binary     Fastfetch from Repo B"));
+
+    // Add a third repository with a long repository name (>8 chars)
+    let repo_long_dir = f.temp.path().join("repo_long");
+    fs::create_dir_all(repo_long_dir.join("packages")).unwrap();
+    write_json(
+        &repo_long_dir.join("index.json"),
+        &json!({
+            "schema_version": 1,
+            "packages": {
+                "long-app": {"definition": "packages/long-app.json", "type": "binary", "description": "App in long repo"}
+            }
+        }),
+    );
+    let repos_long = json!({
+        "schema_version": 1,
+        "repositories": {
+            "default": {"name": "default", "url": f.cat_dir.to_string_lossy(), "priority": 100},
+            "my-extra-long-repository-name": {"name": "my-extra-long-repository-name", "url": repo_long_dir.to_string_lossy(), "priority": 300}
+        }
+    });
+    f.config
+        .save_json_atomic(&f.config.repositories_json, &repos_long)
+        .unwrap();
+
+    f.catalogue().update_all().unwrap();
+
+    let out3 = f.run_cli(&["search", "long-app"]);
+    assert_eq!(code(&out3), 0);
+    let stdout3 = stdout(&out3);
+    assert!(stdout3.contains("PACKAGE ID      REPO                            TYPE       DESCRIPTION"));
+    assert!(stdout3.contains("long-app        my-extra-long-repository-name   binary     App in long repo"));
 }
 
 #[test]

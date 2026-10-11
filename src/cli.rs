@@ -220,11 +220,35 @@ fn search(catalogue: &CatalogueManager, query: &str) -> crate::error::Result<i32
     } else {
         let multi_repo = catalogue.get_repositories()?.len() > 1;
         if multi_repo {
-            println!(
-                "{:<15} {:<8} {:<10} DESCRIPTION",
+            let max_pkg_len = results.keys().map(|k| k.len()).max().unwrap_or(10);
+            let pkg_id_width = std::cmp::max(15, max_pkg_len + 2);
+
+            let max_repo_len = results
+                .values()
+                .map(|info| {
+                    info.get("repository")
+                        .map(py_str)
+                        .unwrap_or_else(|| "default".to_string())
+                        .len()
+                })
+                .max()
+                .unwrap_or(4);
+            let repo_width = std::cmp::max(8, max_repo_len + 2);
+
+            let max_ptype_len = results
+                .values()
+                .map(|info| info.get("type").map(py_str).unwrap_or_default().len())
+                .max()
+                .unwrap_or(4);
+            let ptype_width = std::cmp::max(10, max_ptype_len + 2);
+
+            let header = format!(
+                "{:<pkg_id_width$} {:<repo_width$} {:<ptype_width$} DESCRIPTION",
                 "PACKAGE ID", "REPO", "TYPE"
             );
-            println!("{}", "-".repeat(65));
+            let sep_len = std::cmp::max(65, header.len());
+            println!("{header}");
+            println!("{}", "-".repeat(sep_len));
             for (pkg_id, info) in results.iter() {
                 let desc = info.get("description").map(py_str).unwrap_or_default();
                 let ptype = info.get("type").map(py_str).unwrap_or_default();
@@ -232,15 +256,30 @@ fn search(catalogue: &CatalogueManager, query: &str) -> crate::error::Result<i32
                     .get("repository")
                     .map(py_str)
                     .unwrap_or_else(|| "default".to_string());
-                println!("{pkg_id:<15} {repo:<8} {ptype:<10} {desc}");
+                println!("{pkg_id:<pkg_id_width$} {repo:<repo_width$} {ptype:<ptype_width$} {desc}");
             }
         } else {
-            println!("{:<20} {:<10} DESCRIPTION", "PACKAGE ID", "TYPE");
-            println!("{}", "-".repeat(65));
+            let max_pkg_len = results.keys().map(|k| k.len()).max().unwrap_or(10);
+            let pkg_id_width = std::cmp::max(20, max_pkg_len + 2);
+
+            let max_ptype_len = results
+                .values()
+                .map(|info| info.get("type").map(py_str).unwrap_or_default().len())
+                .max()
+                .unwrap_or(4);
+            let ptype_width = std::cmp::max(10, max_ptype_len + 2);
+
+            let header = format!(
+                "{:<pkg_id_width$} {:<ptype_width$} DESCRIPTION",
+                "PACKAGE ID", "TYPE"
+            );
+            let sep_len = std::cmp::max(65, header.len());
+            println!("{header}");
+            println!("{}", "-".repeat(sep_len));
             for (pkg_id, info) in results.iter() {
                 let desc = info.get("description").map(py_str).unwrap_or_default();
                 let ptype = info.get("type").map(py_str).unwrap_or_default();
-                println!("{pkg_id:<20} {ptype:<10} {desc}");
+                println!("{pkg_id:<pkg_id_width$} {ptype:<ptype_width$} {desc}");
             }
         }
     }
