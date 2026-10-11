@@ -11,4 +11,4 @@ pub mod schema;
 pub mod util;
 pub mod version;
 
-pub const VERSION: &str = "0.2.0";
+pub const VERSION: &str = "0.2.2";
