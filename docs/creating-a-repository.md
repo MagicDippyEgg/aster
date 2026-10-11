@@ -71,12 +71,14 @@ The `index.json` file resides at the root of the repository.
   "packages": {
     "<package_id>": {
       "definition": "packages/<package_id>.json",
-      "type": "binary" | "source",
+      "type": "binary",
       "description": "Short description of the package"
     }
   }
 }
 ```
+
+*Note: The `type` field value must be either `"binary"` for precompiled packages or `"source"` for packages built from source code.*
 
 ### Field Specifications
 
@@ -185,7 +187,7 @@ Source package definitions describe how to fetch source code and compile it loca
 
 - `source` (*object*, required): Source retrieval specification (see [Source Acquisition Types](#3-source-acquisition-types)).
 - `build` (*object*, required): Compilation settings (see [Build System Configurations](#4-build-system-configurations)).
-- `executables` (*array of strings* or *string*, optional): Explicit list of executable names produced by the build to symlink into `~/.bin/aster/bin/`.
+- `executables` (*array of strings* or *string*, optional): List of target binary names produced by Cargo builds to copy from `target/release/` into the installation directory. *(Note: Applicable to `system: "cargo"` builds; CMake, Make, and custom scripted builds install binaries via staging directory discovery.)*
 
 ---
 
@@ -205,7 +207,7 @@ The `source` object configures how Aster downloads or clones the source code pri
 
 - `type`: `"git"`
 - `url`: Git repository URL.
-- `ref`: Commit tag, branch name, or full SHA-1 hash to check out (defaults to `"main"` if omitted).
+- `ref`: Git branch or tag name to check out (passed via `git clone --branch`). Defaults to `"main"` if omitted.
 
 ### Source Archives and HTTP Downloads
 
@@ -242,8 +244,8 @@ For Rust projects, Aster offers native Cargo integration. If Rust/Cargo is not p
 - `system`: `"cargo"`
 - `release` (*boolean*, optional, default `true`): Builds using `cargo build --release`.
 - `locked` (*boolean*, optional, default `false`): Appends `--locked` to cargo invocations.
-- `cargo_args` (*array of strings*, optional): Replaces default `cargo build` flags with custom arguments.
-- `executables` (*array of strings*, optional): Target binaries produced inside `target/release/`.
+- `cargo_args` (*array of strings*, optional): Replaces all default Cargo invocation arguments (normally `build`, `--release`, etc.). Custom arguments must build the target binaries into `target/release/` or `target/debug/` so Aster can collect them.
+- `executables` (*array of strings*, optional): Target binaries produced inside `target/release/` or `target/debug/` to copy into the package staging directory.
 
 #### Cargo Example (`packages/eza-src.json`)
 
@@ -399,8 +401,8 @@ Aster automatically resolves dependencies recursively and installs missing prere
 ### Executable Link Discovery
 
 When a package installation completes:
-1. If `executables` is declared in the JSON definition, Aster symlinks only those specific binary files into `~/.bin/aster/bin/`.
-2. If `executables` is omitted, Aster automatically discovers executable files installed under staging directories like `bin/`, `usr/bin/`, or `local/bin/`.
+1. For Cargo (`system: "cargo"`) builds, if `executables` is declared in the JSON definition, Aster copies those target binaries from `target/release/` into the staging directory.
+2. For all build systems (CMake, Make, custom build steps, and binary archives), Aster discovers executable files installed under conventional staging directories like `bin/`, `sbin/`, `usr/bin/`, or `usr/local/bin/` and symlinks them into `~/.bin/aster/bin/`.
 
 ---
 
