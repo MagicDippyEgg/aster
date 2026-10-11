@@ -189,6 +189,7 @@ fn test_completions_fish() {
     assert!(stdout_str.contains("aster _complete available"));
     assert!(stdout_str.contains("aster _complete installed"));
     assert!(stdout_str.contains("aster _complete repos"));
+    assert!(!stdout_str.contains("-a \"_complete\""));
 }
 
 #[test]

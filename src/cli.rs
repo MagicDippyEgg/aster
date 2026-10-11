@@ -235,6 +235,7 @@ fn internal_complete(
 
 fn completions(shell: clap_complete::Shell) -> crate::error::Result<i32> {
     let mut cmd = Cli::command();
+    cmd = filter_hidden_subcommands(cmd);
     clap_complete::generate(shell, &mut cmd, "aster", &mut std::io::stdout());
 
     if shell == clap_complete::Shell::Fish {
@@ -682,6 +683,36 @@ fn repo(
             Ok(0)
         }
     }
+}
+
+fn filter_hidden_subcommands(cmd: clap::Command) -> clap::Command {
+    let visible_subcommands: Vec<clap::Command> = cmd
+        .get_subcommands()
+        .filter(|sub| !sub.is_hide_set())
+        .map(|sub| filter_hidden_subcommands(sub.clone()))
+        .collect();
+
+    let name: &'static str = Box::leak(cmd.get_name().to_string().into_boxed_str());
+    let mut new_cmd = clap::Command::new(name);
+    if let Some(bin_name) = cmd.get_bin_name() {
+        let bn: &'static str = Box::leak(bin_name.to_string().into_boxed_str());
+        new_cmd = new_cmd.bin_name(bn);
+    }
+    if let Some(version) = cmd.get_version() {
+        let v: &'static str = Box::leak(version.to_string().into_boxed_str());
+        new_cmd = new_cmd.version(v);
+    }
+    if let Some(about) = cmd.get_about() {
+        let a: &'static str = Box::leak(about.to_string().into_boxed_str());
+        new_cmd = new_cmd.about(a);
+    }
+    for arg in cmd.get_arguments() {
+        new_cmd = new_cmd.arg(arg.clone());
+    }
+    for sub in visible_subcommands {
+        new_cmd = new_cmd.subcommand(sub);
+    }
+    new_cmd
 }
 
 fn config_cmd(config: &AsterConfig, command: Option<ConfigCommand>) -> crate::error::Result<i32> {
