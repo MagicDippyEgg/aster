@@ -74,6 +74,9 @@ enum Commands {
         /// Shell to generate completions for
         shell: clap_complete::Shell,
     },
+    /// Internal completion helper
+    #[command(name = "_complete", hide = true)]
+    InternalComplete { target: String },
 }
 
 #[derive(Subcommand)]
@@ -187,12 +190,65 @@ fn dispatch(
         Commands::Repo { command } => repo(config, catalogue, command),
         Commands::Config { command } => config_cmd(config, command),
         Commands::Completions { shell } => completions(shell),
+        Commands::InternalComplete { target } => internal_complete(registry, catalogue, &target),
     }
+}
+
+fn internal_complete(
+    registry: &RegistryManager,
+    catalogue: &CatalogueManager,
+    target: &str,
+) -> crate::error::Result<i32> {
+    match target {
+        "available" => {
+            let packages = catalogue.search_packages("")?;
+            for (pkg_id, info) in packages {
+                let desc = info.get("description").map(py_str).unwrap_or_default();
+                if desc.is_empty() {
+                    println!("{pkg_id}");
+                } else {
+                    println!("{pkg_id}\t{desc}");
+                }
+            }
+        }
+        "installed" => {
+            let installed = registry.list_installed()?;
+            for (pkg_id, info) in installed {
+                let ver = info
+                    .get("version")
+                    .map(py_str)
+                    .unwrap_or_else(|| "installed".to_string());
+                println!("{pkg_id}\tInstalled ({ver})");
+            }
+        }
+        "repos" => {
+            let repos = catalogue.get_repositories()?;
+            for (name, info) in repos {
+                let url = info.get("url").map(py_str).unwrap_or_default();
+                println!("{name}\t{url}");
+            }
+        }
+        _ => {}
+    }
+    Ok(0)
 }
 
 fn completions(shell: clap_complete::Shell) -> crate::error::Result<i32> {
     let mut cmd = Cli::command();
     clap_complete::generate(shell, &mut cmd, "aster", &mut std::io::stdout());
+
+    if shell == clap_complete::Shell::Fish {
+        println!(
+            "\n# Custom dynamic completions for Aster package manager\n\
+             complete -c aster -n \"__fish_aster_using_subcommand install\" -a \"(aster _complete available 2>/dev/null)\"\n\
+             complete -c aster -n \"__fish_aster_using_subcommand info\" -a \"(aster _complete available 2>/dev/null)\"\n\
+             complete -c aster -n \"__fish_aster_using_subcommand installed\" -a \"(aster _complete available 2>/dev/null)\"\n\
+             complete -c aster -n \"__fish_aster_using_subcommand remove\" -a \"(aster _complete installed 2>/dev/null)\"\n\
+             complete -c aster -n \"__fish_aster_using_subcommand upgrade\" -a \"(aster _complete installed 2>/dev/null)\"\n\
+             complete -c aster -n \"__fish_aster_using_subcommand repo; and __fish_seen_subcommand_from remove\" -a \"(aster _complete repos 2>/dev/null)\"\n\
+             complete -c aster -n \"__fish_aster_using_subcommand repo; and __fish_seen_subcommand_from set-priority\" -a \"(aster _complete repos 2>/dev/null)\""
+        );
+    }
     Ok(0)
 }
 
