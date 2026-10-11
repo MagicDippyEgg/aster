@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const USER_AGENT: &str = "Aster-PackageManager/0.2.0";
+pub const USER_AGENT: &str = "Aster-PackageManager/0.2.1";
 
 pub fn default_aster_home() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
