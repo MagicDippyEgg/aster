@@ -437,15 +437,21 @@ impl AsterConfig {
     pub fn log_history(&self, message: &str) {
         let history_file = self.logs_dir.join("history.log");
         if let Some(parent) = history_file.parent() {
-            let _ = fs::create_dir_all(parent);
+            if let Err(e) = fs::create_dir_all(parent) {
+                eprintln!("Warning: Failed to create log directory: {e}");
+                return;
+            }
         }
         let timestamp = crate::util::current_timestamp();
         let line = format!("[{timestamp}] {message}\n");
-        let _ = std::fs::OpenOptions::new()
+        let res = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&history_file)
             .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+        if let Err(e) = res {
+            eprintln!("Warning: Failed to write to history log: {e}");
+        }
     }
 }
 
