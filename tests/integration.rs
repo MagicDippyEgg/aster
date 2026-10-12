@@ -1590,3 +1590,44 @@ fn test_verify_rejects_package_directory_symlink() {
         "verification should flag a package directory replaced by a symlink; got: {issues:?}"
     );
 }
+
+
+#[test]
+fn test_install_does_not_overwrite_unmanaged_command_file() {
+    let f = Fixture::new();
+    f.catalogue().update_all().unwrap();
+
+    let command_path = f.config.bin_dir.join("fastfetch");
+    fs::write(&command_path, b"user-owned command").unwrap();
+
+    let err = f
+        .installer()
+        .install("fastfetch-bin", true, false)
+        .unwrap_err();
+    assert!(err.to_string().contains("not owned by package"));
+    assert_eq!(fs::read(&command_path).unwrap(), b"user-owned command");
+    assert!(!f.registry().is_installed("fastfetch-bin").unwrap());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_remove_rejects_unsafe_command_metadata_without_deleting_external_symlink() {
+    let f = Fixture::new();
+    f.catalogue().update_all().unwrap();
+    f.installer().install("fastfetch-bin", true, false).unwrap();
+
+    let external_link = f.root.join("external-dangling-link");
+    std::os::unix::fs::symlink(f.root.join("missing-target"), &external_link).unwrap();
+
+    let mut registry = f.registry().load_registry().unwrap();
+    let installed = registry["installed"].as_object_mut().unwrap();
+    let package = installed.get_mut("fastfetch-bin").unwrap().as_object_mut().unwrap();
+    package.insert("provided_binaries".to_string(), json!(["../external-dangling-link"]));
+    f.registry().save_registry(&registry).unwrap();
+
+    let err = f.installer().remove("fastfetch-bin", true).unwrap_err();
+    assert!(err.to_string().contains("Invalid command name"));
+    assert!(external_link.is_symlink());
+    assert!(f.registry().is_installed("fastfetch-bin").unwrap());
+    assert!(f.config.bin_dir.join("fastfetch").exists());
+}

@@ -2,7 +2,7 @@
 
 use crate::config::AsterConfig;
 use crate::error::Result;
-use crate::schema::{validate_package_id, validate_registry};
+use crate::schema::{validate_binary_name, validate_package_id, validate_registry};
 use serde_json::{json, Map, Value};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -88,6 +88,10 @@ impl RegistryManager {
         source_repository: &str,
         extra_metadata: Option<&Map<String, Value>>,
     ) -> Result<()> {
+        validate_package_id(package_id)?;
+        for binary_name in provided_binaries {
+            validate_binary_name(binary_name)?;
+        }
         let package_dir = self.config.packages_dir.join(package_id);
         std::fs::create_dir_all(&package_dir)?;
 
@@ -216,14 +220,7 @@ impl RegistryManager {
             Some(bins) => {
                 for b in bins {
                     let bin_name = match b.as_str() {
-                        Some(name)
-                            if !name.is_empty()
-                                && name != "."
-                                && name != ".."
-                                && !name.contains('/')
-                                && !name.contains('\\')
-                                && !name.contains('\0') =>
-                        {
+                        Some(name) if validate_binary_name(name).is_ok() => {
                             name
                         }
                         Some(name) => {
@@ -281,6 +278,7 @@ impl RegistryManager {
 
     /// Removes a package from `packages.json`.
     pub fn unregister_package(&self, package_id: &str) -> Result<()> {
+        validate_package_id(package_id)?;
         let mut registry = self.load_registry()?;
         if let Some(Value::Object(map)) = registry.get_mut("installed") {
             if map.remove(package_id).is_some() {

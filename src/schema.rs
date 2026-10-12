@@ -19,6 +19,36 @@ pub fn validate_package_id(package_id: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn validate_binary_name(binary_name: &str) -> Result<()> {
+    if binary_name.is_empty()
+        || binary_name == "."
+        || binary_name == ".."
+        || binary_name.contains('/')
+        || binary_name.contains('\\')
+        || binary_name.contains('\0')
+    {
+        return Err(AsterError::Validation(format!(
+            "Invalid command name '{binary_name}': names cannot contain path separators or NUL."
+        )));
+    }
+    Ok(())
+}
+
+pub fn validate_repository_name(repository_name: &str) -> Result<()> {
+    if repository_name.is_empty()
+        || repository_name == "."
+        || repository_name == ".."
+        || repository_name.contains('/')
+        || repository_name.contains('\\')
+        || repository_name.contains('\0')
+    {
+        return Err(AsterError::Validation(format!(
+            "Invalid repository name '{repository_name}': names cannot contain path separators or NUL."
+        )));
+    }
+    Ok(())
+}
+
 pub fn validate_package_definition(data: &Value) -> Result<()> {
     let obj = data.as_object().ok_or_else(|| {
         AsterError::Validation("Package definition must be a JSON object.".to_string())
@@ -105,5 +135,15 @@ mod tests {
         for id in ["fastfetch-bin", "python3.12", "lib_foo", "c++", "7zip"] {
             assert!(validate_package_id(id).is_ok(), "should accept {id:?}");
         }
+    }
+
+    #[test]
+    fn command_and_repository_names_reject_path_components() {
+        for name in ["", ".", "..", "../escape", "pkg/escape", "pkg\\escape", "nul\0name"] {
+            assert!(validate_binary_name(name).is_err(), "should reject command {name:?}");
+            assert!(validate_repository_name(name).is_err(), "should reject repository {name:?}");
+        }
+        assert!(validate_binary_name("fastfetch").is_ok());
+        assert!(validate_repository_name("community-x86_64").is_ok());
     }
 }

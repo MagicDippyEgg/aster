@@ -5,7 +5,7 @@ use crate::config::{get_build_env, AsterConfig};
 use crate::error::{AsterError, Result};
 use crate::registry::RegistryManager;
 use crate::resolver::DependencyResolver;
-use crate::schema::validate_package_id;
+use crate::schema::{validate_binary_name, validate_package_definition, validate_package_id};
 use crate::util::normalize_path_lexically;
 use crate::util::{
     collect_files, exists_or_symlink, find_file, is_executable, py_get_bool, py_str, set_mode,
@@ -626,29 +626,60 @@ impl PackageInstaller {
         AsterError::Runtime(msg.join("\n"))
     }
 
+    /// Returns true only for a symlink whose lexical target is inside this
+    /// package's own directory or its preserved upgrade backup.
+    fn symlink_points_to_package(&self, link_path: &Path, package_id: &str) -> bool {
+        if !link_path.is_symlink() {
+            return false;
+        }
+        let raw_target = match std::fs::read_link(link_path) {
+            Ok(target) => target,
+            Err(_) => return false,
+        };
+        let target = if raw_target.is_relative() {
+            normalize_path_lexically(&self.config.bin_dir.join(raw_target))
+        } else {
+            normalize_path_lexically(&raw_target)
+        };
+        let package_dir = normalize_path_lexically(&self.config.packages_dir.join(package_id));
+        let backup_dir = normalize_path_lexically(
+            &self.config.packages_dir.join(format!("{package_id}.upgrade_backup")),
+        );
+        target.starts_with(&package_dir) || target.starts_with(&backup_dir)
+    }
+
     fn check_binary_conflicts(
         &self,
         provided_binaries: &[String],
         current_package_id: &str,
     ) -> Result<()> {
+        let installed_pkgs = self.registry.list_installed()?;
         for binary_name in provided_binaries {
-            let target_link = self.config.bin_dir.join(binary_name);
-            if exists_or_symlink(&target_link) {
-                let installed_pkgs = self.registry.list_installed()?;
-                for (existing_id, existing_info) in installed_pkgs.iter() {
-                    if existing_id != current_package_id {
-                        let provides = existing_info
-                            .get("provided_binaries")
-                            .and_then(|v| v.as_array())
-                            .map(|arr| arr.iter().any(|b| b.as_str() == Some(binary_name.as_str())))
-                            .unwrap_or(false);
-                        if provides {
-                            return Err(AsterError::Runtime(format!(
-                                "Command conflict: '{binary_name}' is already provided by installed package '{existing_id}'."
-                            )));
-                        }
+            validate_binary_name(binary_name)?;
+
+            for (existing_id, existing_info) in installed_pkgs.iter() {
+                if existing_id != current_package_id {
+                    let provides = existing_info
+                        .get("provided_binaries")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter().any(|b| b.as_str() == Some(binary_name.as_str())))
+                        .unwrap_or(false);
+                    if provides {
+                        return Err(AsterError::Runtime(format!(
+                            "Command conflict: '{binary_name}' is already provided by installed package '{existing_id}'."
+                        )));
                     }
                 }
+            }
+
+            let target_link = self.config.bin_dir.join(binary_name);
+            if exists_or_symlink(&target_link)
+                && !self.symlink_points_to_package(&target_link, current_package_id)
+            {
+                return Err(AsterError::Runtime(format!(
+                    "Command conflict: '{binary_name}' already exists at '{}' and is not owned by package '{current_package_id}'.",
+                    target_link.display()
+                )));
             }
         }
         Ok(())
@@ -689,7 +720,10 @@ impl PackageInstaller {
                                 }
                             }
                             Err(_) => {
-                                if link_path.is_symlink() && binaries_to_check.contains(&name) {
+                                if link_path.is_symlink()
+                                    && binaries_to_check.contains(&name)
+                                    && self.symlink_points_to_package(&link_path, pkg_id)
+                                {
                                     let _ = std::fs::remove_file(&link_path);
                                 }
                             }
@@ -705,13 +739,34 @@ impl PackageInstaller {
         self.install_binary_from(pkg_def, "default")
     }
 
+    /// Refuses to overwrite installed records or orphaned package directories.
+    fn ensure_install_target_available(&self, package_id: &str) -> Result<()> {
+        validate_package_id(package_id)?;
+        if self.registry.is_installed(package_id)? {
+            return Err(AsterError::Runtime(format!(
+                "Package '{package_id}' is already installed; use 'upgrade' to replace it."
+            )));
+        }
+
+        let package_dir = self.config.packages_dir.join(package_id);
+        if exists_or_symlink(&package_dir) {
+            return Err(AsterError::Runtime(format!(
+                "Refusing to overwrite existing package path '{}'; inspect or remove it before installing '{package_id}'.",
+                package_dir.display()
+            )));
+        }
+        Ok(())
+    }
+
     /// Installs a binary package, recording `source_repository` in the registry.
     pub fn install_binary_from(&self, pkg_def: &Value, source_repository: &str) -> Result<()> {
+        validate_package_definition(pkg_def)?;
         let pkg_id = pkg_def
             .get("id")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        self.ensure_install_target_available(&pkg_id)?;
         let mut provided_binaries: Vec<String> = Vec::new();
         let result = self.do_install_binary(pkg_def, source_repository, &mut provided_binaries);
         if result.is_err() {
@@ -917,11 +972,13 @@ impl PackageInstaller {
         verbose: bool,
         source_repository: &str,
     ) -> Result<()> {
+        validate_package_definition(pkg_def)?;
         let pkg_id = pkg_def
             .get("id")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        self.ensure_install_target_available(&pkg_id)?;
         let mut provided_binaries: Vec<String> = Vec::new();
         let result = self.do_install_source(
             pkg_def,
@@ -1431,6 +1488,9 @@ impl PackageInstaller {
                 declared_execs = value_to_string_list(v);
             }
         }
+        for executable in &declared_execs {
+            validate_binary_name(executable)?;
+        }
 
         let staging_bin = staging_dir.join("bin");
         std::fs::create_dir_all(&staging_bin)?;
@@ -1504,6 +1564,14 @@ impl PackageInstaller {
         final_package_dir: &Path,
         provided_binaries: &[String],
     ) -> Result<()> {
+        let package_id = final_package_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| AsterError::Runtime("Invalid package installation path.".to_string()))?;
+        for bin_name in provided_binaries {
+            validate_binary_name(bin_name)?;
+        }
+
         std::fs::create_dir_all(&self.config.bin_dir)?;
         for bin_name in provided_binaries {
             let mut target_bin = final_package_dir.join("bin").join(bin_name);
@@ -1517,6 +1585,12 @@ impl PackageInstaller {
                 set_mode(&target_bin, 0o755)?;
                 let link_path = self.config.bin_dir.join(bin_name);
                 if exists_or_symlink(&link_path) {
+                    if !self.symlink_points_to_package(&link_path, package_id) {
+                        return Err(AsterError::Runtime(format!(
+                            "Refusing to replace existing command path '{}' not owned by package '{package_id}'.",
+                            link_path.display()
+                        )));
+                    }
                     std::fs::remove_file(&link_path)?;
                 }
                 #[cfg(unix)]
@@ -1559,31 +1633,33 @@ impl PackageInstaller {
             })
             .unwrap_or_default();
 
+        for binary_name in &provided_binaries {
+            validate_binary_name(binary_name)?;
+        }
+
         let pkg_dir = self.config.packages_dir.join(package_id);
-        let pkg_resolved = std::fs::canonicalize(&pkg_dir).unwrap_or_else(|_| pkg_dir.clone());
+        let pkg_dir_is_real = match std::fs::symlink_metadata(&pkg_dir) {
+            Ok(metadata) if metadata.file_type().is_dir() => true,
+            Ok(_) => {
+                return Err(AsterError::Runtime(format!(
+                    "Refusing to remove '{package_id}': package path '{}' is not a real directory.",
+                    pkg_dir.display()
+                )));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => return Err(e.into()),
+        };
 
         for bin_name in &provided_binaries {
             let link_path = self.config.bin_dir.join(bin_name);
-            if exists_or_symlink(&link_path) {
-                match std::fs::canonicalize(&link_path) {
-                    Ok(target) => {
-                        if target.starts_with(&pkg_resolved)
-                            || target.starts_with(&pkg_dir)
-                            || !link_path.exists()
-                        {
-                            std::fs::remove_file(&link_path)?;
-                        }
-                    }
-                    Err(_) => {
-                        if link_path.is_symlink() {
-                            std::fs::remove_file(&link_path)?;
-                        }
-                    }
-                }
+            if exists_or_symlink(&link_path)
+                && self.symlink_points_to_package(&link_path, package_id)
+            {
+                std::fs::remove_file(&link_path)?;
             }
         }
 
-        if pkg_dir.exists() {
+        if pkg_dir_is_real {
             std::fs::remove_dir_all(&pkg_dir)?;
         }
 

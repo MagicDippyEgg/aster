@@ -2,7 +2,9 @@
 
 use crate::config::{fetch_url, AsterConfig};
 use crate::error::{AsterError, Result};
-use crate::schema::{validate_index, validate_package_definition, validate_package_id};
+use crate::schema::{
+    validate_index, validate_package_definition, validate_package_id, validate_repository_name,
+};
 use crate::util::py_str;
 use serde_json::{Map, Value};
 use std::fs;
@@ -43,6 +45,7 @@ impl CatalogueManager {
 
     /// Fetches the remote `index.json` for `repo_name` and caches it locally.
     pub fn update_repository(&self, repo_name: &str) -> Result<Value> {
+        validate_repository_name(repo_name)?;
         let repos = self.get_repositories()?;
         let repo_info = repos.get(repo_name).ok_or_else(|| {
             AsterError::Runtime(format!("Repository '{repo_name}' is not configured."))
@@ -111,6 +114,7 @@ impl CatalogueManager {
 
     /// Returns the cached `index.json` for `repo_name` if present.
     pub fn get_cached_index(&self, repo_name: &str) -> Result<Option<Value>> {
+        validate_repository_name(repo_name)?;
         let cached = self
             .config
             .repository_cache
