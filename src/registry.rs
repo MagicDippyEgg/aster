@@ -220,9 +220,7 @@ impl RegistryManager {
             Some(bins) => {
                 for b in bins {
                     let bin_name = match b.as_str() {
-                        Some(name) if validate_binary_name(name).is_ok() => {
-                            name
-                        }
+                        Some(name) if validate_binary_name(name).is_ok() => name,
                         Some(name) => {
                             issues.push(format!("Unsafe recorded command name: {name}"));
                             continue;
