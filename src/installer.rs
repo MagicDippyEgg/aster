@@ -5,6 +5,8 @@ use crate::config::{get_build_env, AsterConfig};
 use crate::error::{AsterError, Result};
 use crate::registry::RegistryManager;
 use crate::resolver::DependencyResolver;
+use crate::schema::{validate_binary_name, validate_package_definition, validate_package_id};
+use crate::util::normalize_path_lexically;
 use crate::util::{
     collect_files, exists_or_symlink, find_file, is_executable, py_get_bool, py_str, set_mode,
     which,
@@ -264,6 +266,7 @@ impl PackageInstaller {
 
     /// Upgrades an installed package safely, preserving the previous version and rolling back on failure.
     pub fn upgrade_package(&self, package_id: &str, auto_yes: bool, verbose: bool) -> Result<()> {
+        validate_package_id(package_id)?;
         if !self.registry.is_installed(package_id)? {
             return Err(AsterError::Runtime(format!(
                 "Package '{package_id}' is not installed."
@@ -277,22 +280,57 @@ impl PackageInstaller {
                 AsterError::Runtime(format!("Package '{package_id}' is not installed."))
             })?;
 
+        // Validate local registry command metadata before moving the installed
+        // package or changing registry state. These names are later used as
+        // paths beneath the command directory during upgrade cleanup/rollback.
+        let old_binaries = match old_info.get("provided_binaries").and_then(Value::as_array) {
+            Some(arr) => arr
+                .iter()
+                .map(|value| {
+                    value.as_str().map(String::from).ok_or_else(|| {
+                        AsterError::Runtime(format!(
+                            "Cannot safely upgrade '{package_id}': invalid recorded command metadata."
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?,
+            None => {
+                return Err(AsterError::Runtime(format!(
+                    "Cannot safely upgrade '{package_id}': missing or invalid recorded command metadata."
+                )));
+            }
+        };
+        for binary_name in &old_binaries {
+            validate_binary_name(binary_name)?;
+        }
+
         let pkg_dir = self.config.packages_dir.join(package_id);
         let backup_dir = self
             .config
             .packages_dir
             .join(format!("{package_id}.upgrade_backup"));
 
-        if backup_dir.exists() {
+        if exists_or_symlink(&backup_dir) {
             return Err(AsterError::Runtime(format!(
                 "An existing recovery backup for '{package_id}' was found at '{}'. Please inspect or remove it before attempting an upgrade.",
                 backup_dir.display()
             )));
         }
 
-        if pkg_dir.exists() {
-            std::fs::rename(&pkg_dir, &backup_dir)?;
+        let pkg_metadata = std::fs::symlink_metadata(&pkg_dir).map_err(|e| {
+            AsterError::Runtime(format!(
+                "Cannot safely upgrade '{package_id}': installed package directory '{}' cannot be accessed: {e}",
+                pkg_dir.display()
+            ))
+        })?;
+        if !pkg_metadata.is_dir() {
+            return Err(AsterError::Runtime(format!(
+                "Cannot safely upgrade '{package_id}': installed package path '{}' is not a real directory.",
+                pkg_dir.display()
+            )));
         }
+
+        std::fs::rename(&pkg_dir, &backup_dir)?;
 
         if let Err(e) = self.registry.unregister_package(package_id) {
             let mut restore_err_msg = String::new();
@@ -305,16 +343,6 @@ impl PackageInstaller {
                 "Failed to unregister '{package_id}' before upgrade: {e}.{restore_err_msg}"
             )));
         }
-
-        let old_binaries: Vec<String> = old_info
-            .get("provided_binaries")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|b| b.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
 
         let install_res = self.install(package_id, auto_yes, verbose);
         let newly_installed = self.registry.is_installed(package_id).unwrap_or(false);
@@ -352,9 +380,11 @@ impl PackageInstaller {
                             Err(_) => {
                                 if let Ok(raw_target) = std::fs::read_link(&link_path) {
                                     let raw_path = if raw_target.is_relative() {
-                                        self.config.bin_dir.join(&raw_target)
+                                        normalize_path_lexically(
+                                            &self.config.bin_dir.join(&raw_target),
+                                        )
                                     } else {
-                                        raw_target
+                                        normalize_path_lexically(&raw_target)
                                     };
                                     raw_path.starts_with(&pkg_resolved)
                                         || raw_path.starts_with(&pkg_dir)
@@ -401,41 +431,48 @@ impl PackageInstaller {
 
             let mut rollback_errors = Vec::new();
 
-            if backup_dir.exists() {
-                if let Err(e) = std::fs::rename(&backup_dir, &pkg_dir) {
-                    rollback_errors.push(format!(
-                        "failed to restore package directory ({e}); backup preserved at '{}' for manual recovery",
-                        backup_dir.display()
-                    ));
+            let restored_old_dir = if exists_or_symlink(&backup_dir) {
+                match std::fs::rename(&backup_dir, &pkg_dir) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        rollback_errors.push(format!(
+                            "failed to restore package directory ({e}); backup preserved at '{}' for manual recovery",
+                            backup_dir.display()
+                        ));
+                        false
+                    }
                 }
-            }
+            } else {
+                rollback_errors.push(format!(
+                    "recovery backup '{}' is missing; the previous package directory cannot be restored",
+                    backup_dir.display()
+                ));
+                false
+            };
 
-            if pkg_dir.exists() {
+            if restored_old_dir {
                 if let Err(e) = self.create_symlinks(&pkg_dir, &old_binaries) {
                     rollback_errors.push(format!("failed to restore command symlinks: {e}"));
                 }
-            }
 
-            match self.registry.load_registry() {
-                Ok(mut reg) => {
-                    if let Some(Value::Object(map)) = reg.get_mut("installed") {
-                        map.insert(package_id.to_string(), old_info);
-                        if let Err(e) = self.registry.save_registry(&reg) {
-                            rollback_errors.push(format!("failed to restore registry entry: {e}"));
+                match self.registry.load_registry() {
+                    Ok(mut reg) => {
+                        match reg.get_mut("installed") {
+                            Some(Value::Object(map)) => {
+                                map.insert(package_id.to_string(), old_info);
+                                if let Err(e) = self.registry.save_registry(&reg) {
+                                    rollback_errors.push(format!("failed to restore registry entry: {e}"));
+                                }
+                            }
+                            _ => rollback_errors.push(
+                                "failed to restore registry entry: registry has no valid 'installed' map".to_string()
+                            ),
                         }
                     }
+                    Err(e) => {
+                        rollback_errors.push(format!("failed to load registry during rollback: {e}"));
+                    }
                 }
-                Err(e) => {
-                    rollback_errors.push(format!("failed to load registry during rollback: {e}"));
-                }
-            }
-
-            if backup_dir.exists()
-                && !rollback_errors
-                    .iter()
-                    .any(|e| e.contains("failed to restore package directory"))
-            {
-                let _ = std::fs::remove_dir_all(&backup_dir);
             }
 
             let install_err_desc = match install_res {
@@ -603,29 +640,75 @@ impl PackageInstaller {
         AsterError::Runtime(msg.join("\n"))
     }
 
+    /// Returns true only when a symlink points inside an existing real package
+    /// directory or its preserved upgrade backup.
+    fn symlink_points_to_package(&self, link_path: &Path, package_id: &str) -> bool {
+        if !link_path.is_symlink() {
+            return false;
+        }
+        let raw_target = match std::fs::read_link(link_path) {
+            Ok(target) => target,
+            Err(_) => return false,
+        };
+        let target = if raw_target.is_relative() {
+            normalize_path_lexically(&self.config.bin_dir.join(raw_target))
+        } else {
+            normalize_path_lexically(&raw_target)
+        };
+        let package_dir = normalize_path_lexically(&self.config.packages_dir.join(package_id));
+        let backup_dir = normalize_path_lexically(
+            &self
+                .config
+                .packages_dir
+                .join(format!("{package_id}.upgrade_backup")),
+        );
+        let package_dir_is_real = std::fs::symlink_metadata(&package_dir)
+            .map(|metadata| metadata.file_type().is_dir())
+            .unwrap_or(false);
+        let backup_dir_is_real = std::fs::symlink_metadata(&backup_dir)
+            .map(|metadata| metadata.file_type().is_dir())
+            .unwrap_or(false);
+
+        // During upgrades, the old absolute command symlinks still point at
+        // package_dir even though the package contents have been renamed to
+        // backup_dir. Only trust that path while a real package or backup
+        // directory exists.
+        (package_dir_is_real || backup_dir_is_real)
+            && (target.starts_with(&package_dir) || target.starts_with(&backup_dir))
+    }
+
     fn check_binary_conflicts(
         &self,
         provided_binaries: &[String],
         current_package_id: &str,
     ) -> Result<()> {
+        let installed_pkgs = self.registry.list_installed()?;
         for binary_name in provided_binaries {
-            let target_link = self.config.bin_dir.join(binary_name);
-            if exists_or_symlink(&target_link) {
-                let installed_pkgs = self.registry.list_installed()?;
-                for (existing_id, existing_info) in installed_pkgs.iter() {
-                    if existing_id != current_package_id {
-                        let provides = existing_info
-                            .get("provided_binaries")
-                            .and_then(|v| v.as_array())
-                            .map(|arr| arr.iter().any(|b| b.as_str() == Some(binary_name.as_str())))
-                            .unwrap_or(false);
-                        if provides {
-                            return Err(AsterError::Runtime(format!(
-                                "Command conflict: '{binary_name}' is already provided by installed package '{existing_id}'."
-                            )));
-                        }
+            validate_binary_name(binary_name)?;
+
+            for (existing_id, existing_info) in installed_pkgs.iter() {
+                if existing_id != current_package_id {
+                    let provides = existing_info
+                        .get("provided_binaries")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter().any(|b| b.as_str() == Some(binary_name.as_str())))
+                        .unwrap_or(false);
+                    if provides {
+                        return Err(AsterError::Runtime(format!(
+                            "Command conflict: '{binary_name}' is already provided by installed package '{existing_id}'."
+                        )));
                     }
                 }
+            }
+
+            let target_link = self.config.bin_dir.join(binary_name);
+            if exists_or_symlink(&target_link)
+                && !self.symlink_points_to_package(&target_link, current_package_id)
+            {
+                return Err(AsterError::Runtime(format!(
+                    "Command conflict: '{binary_name}' already exists at '{}' and is not owned by package '{current_package_id}'.",
+                    target_link.display()
+                )));
             }
         }
         Ok(())
@@ -642,10 +725,11 @@ impl PackageInstaller {
         if build_dir.exists() {
             let _ = std::fs::remove_dir_all(&build_dir);
         }
-        if !self.registry.is_installed(pkg_id).unwrap_or(false) && final_package_dir.exists() {
-            let _ = std::fs::remove_dir_all(&final_package_dir);
-        }
+        let package_is_registered = self.registry.is_installed(pkg_id).unwrap_or(false);
 
+        // Remove links while the failed package directory still exists. Once its
+        // target directory is deleted, canonicalization cannot prove ownership
+        // and a dangling link could otherwise be left behind.
         if self.config.bin_dir.exists() {
             let binaries_to_check: std::collections::HashSet<&String> =
                 provided_binaries.iter().collect();
@@ -666,7 +750,10 @@ impl PackageInstaller {
                                 }
                             }
                             Err(_) => {
-                                if link_path.is_symlink() && binaries_to_check.contains(&name) {
+                                if link_path.is_symlink()
+                                    && binaries_to_check.contains(&name)
+                                    && self.symlink_points_to_package(&link_path, pkg_id)
+                                {
                                     let _ = std::fs::remove_file(&link_path);
                                 }
                             }
@@ -675,6 +762,10 @@ impl PackageInstaller {
                 }
             }
         }
+
+        if !package_is_registered && final_package_dir.exists() {
+            let _ = std::fs::remove_dir_all(&final_package_dir);
+        }
     }
 
     /// Installs a binary package from its definition.
@@ -682,13 +773,47 @@ impl PackageInstaller {
         self.install_binary_from(pkg_def, "default")
     }
 
+    /// Returns false for an already-installed real package directory, making
+    /// direct installs idempotent rather than destructively reinstalling it.
+    fn ensure_install_target_available(&self, package_id: &str) -> Result<bool> {
+        validate_package_id(package_id)?;
+        let package_dir = self.config.packages_dir.join(package_id);
+
+        if self.registry.is_installed(package_id)? {
+            return match std::fs::symlink_metadata(&package_dir) {
+                Ok(metadata) if metadata.file_type().is_dir() => Ok(false),
+                Ok(_) => Err(AsterError::Runtime(format!(
+                    "Refusing to install '{package_id}': registered package path '{}' is not a real directory.",
+                    package_dir.display()
+                ))),
+                Err(e) => Err(AsterError::Runtime(format!(
+                    "Refusing to install '{package_id}': registered package directory '{}' cannot be accessed: {e}",
+                    package_dir.display()
+                ))),
+            };
+        }
+
+        if exists_or_symlink(&package_dir) {
+            return Err(AsterError::Runtime(format!(
+                "Refusing to overwrite existing package path '{}'; inspect or remove it before installing '{package_id}'.",
+                package_dir.display()
+            )));
+        }
+        Ok(true)
+    }
+
     /// Installs a binary package, recording `source_repository` in the registry.
     pub fn install_binary_from(&self, pkg_def: &Value, source_repository: &str) -> Result<()> {
+        validate_package_definition(pkg_def)?;
         let pkg_id = pkg_def
             .get("id")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        if !self.ensure_install_target_available(&pkg_id)? {
+            println!("Package '{pkg_id}' is already installed; skipping duplicate install.");
+            return Ok(());
+        }
         let mut provided_binaries: Vec<String> = Vec::new();
         let result = self.do_install_binary(pkg_def, source_repository, &mut provided_binaries);
         if result.is_err() {
@@ -754,37 +879,30 @@ impl PackageInstaller {
             .map(|s| s.to_string());
 
         let msg_prefix = format!("Downloading binary release for {pkg_id} ({platform_key})...");
-        let download_filename = url
-            .rsplit('/')
-            .next()
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("{pkg_id}.archive"));
+        let download_filename = download_filename_from_url(&url, &pkg_id);
         let dest_archive = self.config.downloads_cache.join(&download_filename);
 
         download_with_progress(&url, &dest_archive, &msg_prefix, 30)?;
 
         if let Some(expected) = &expected_sha256 {
-            if expected != "EXPECTED_SHA256" {
-                let mut hasher = Sha256::new();
-                let mut f = std::fs::File::open(&dest_archive)?;
-                let mut buf = [0u8; 65536];
-                loop {
-                    let n = f.read(&mut buf)?;
-                    if n == 0 {
-                        break;
-                    }
-                    hasher.update(&buf[..n]);
+            let mut hasher = Sha256::new();
+            let mut f = std::fs::File::open(&dest_archive)?;
+            let mut buf = [0u8; 65536];
+            loop {
+                let n = f.read(&mut buf)?;
+                if n == 0 {
+                    break;
                 }
-                let digest = format!("{:x}", hasher.finalize());
-                if digest.to_lowercase() != expected.to_lowercase() {
-                    if dest_archive.exists() {
-                        let _ = std::fs::remove_file(&dest_archive);
-                    }
-                    return Err(AsterError::Runtime(format!(
-                        "Integrity check failed for '{pkg_id}'. Expected sha256 {expected}, got {digest}"
-                    )));
+                hasher.update(&buf[..n]);
+            }
+            let digest = format!("{:x}", hasher.finalize());
+            if digest.to_lowercase() != expected.to_lowercase() {
+                if dest_archive.exists() {
+                    let _ = std::fs::remove_file(&dest_archive);
                 }
+                return Err(AsterError::Runtime(format!(
+                    "Integrity check failed for '{pkg_id}'. Expected sha256 {expected}, got {digest}"
+                )));
             }
         }
 
@@ -894,11 +1012,16 @@ impl PackageInstaller {
         verbose: bool,
         source_repository: &str,
     ) -> Result<()> {
+        validate_package_definition(pkg_def)?;
         let pkg_id = pkg_def
             .get("id")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        if !self.ensure_install_target_available(&pkg_id)? {
+            println!("Package '{pkg_id}' is already installed; skipping duplicate install.");
+            return Ok(());
+        }
         let mut provided_binaries: Vec<String> = Vec::new();
         let result = self.do_install_source(
             pkg_def,
@@ -995,17 +1118,7 @@ impl PackageInstaller {
                 }
             }
             "tar.gz" | "tar.xz" | "txz" | "zip" | "archive" | "url" => {
-                let ext = if src_type == "zip" || src_url.ends_with(".zip") {
-                    ".zip"
-                } else if src_type == "tar.xz"
-                    || src_type == "txz"
-                    || src_url.ends_with(".tar.xz")
-                    || src_url.ends_with(".txz")
-                {
-                    ".tar.xz"
-                } else {
-                    ".tar.gz"
-                };
+                let ext = source_archive_extension(&src_type, &src_url);
                 let dest_archive = self.config.downloads_cache.join(format!("{pkg_id}{ext}"));
 
                 let msg_prefix = format!("Downloading source archive for {pkg_id}...");
@@ -1157,7 +1270,13 @@ impl PackageInstaller {
                 format!("DESTDIR={}", staging_dir.to_string_lossy()),
                 "install".to_string(),
             ];
-            let _res = self.executor.run(&install_cmd, None, &build_env, verbose)?;
+            let res = self.executor.run(&install_cmd, None, &build_env, verbose)?;
+            if res.code != 0 {
+                return Err(self.handle_build_failure(
+                    &format!("{}\n{}", res.stdout, res.stderr),
+                    "Make install",
+                ));
+            }
         }
 
         // Prefer executables that the build system installed into the staging
@@ -1402,6 +1521,9 @@ impl PackageInstaller {
                 declared_execs = value_to_string_list(v);
             }
         }
+        for executable in &declared_execs {
+            validate_binary_name(executable)?;
+        }
 
         let staging_bin = staging_dir.join("bin");
         std::fs::create_dir_all(&staging_bin)?;
@@ -1475,6 +1597,14 @@ impl PackageInstaller {
         final_package_dir: &Path,
         provided_binaries: &[String],
     ) -> Result<()> {
+        let package_id = final_package_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| AsterError::Runtime("Invalid package installation path.".to_string()))?;
+        for bin_name in provided_binaries {
+            validate_binary_name(bin_name)?;
+        }
+
         std::fs::create_dir_all(&self.config.bin_dir)?;
         for bin_name in provided_binaries {
             let mut target_bin = final_package_dir.join("bin").join(bin_name);
@@ -1488,6 +1618,12 @@ impl PackageInstaller {
                 set_mode(&target_bin, 0o755)?;
                 let link_path = self.config.bin_dir.join(bin_name);
                 if exists_or_symlink(&link_path) {
+                    if !self.symlink_points_to_package(&link_path, package_id) {
+                        return Err(AsterError::Runtime(format!(
+                            "Refusing to replace existing command path '{}' not owned by package '{package_id}'.",
+                            link_path.display()
+                        )));
+                    }
                     std::fs::remove_file(&link_path)?;
                 }
                 #[cfg(unix)]
@@ -1501,6 +1637,7 @@ impl PackageInstaller {
 
     /// Removes an installed package.
     pub fn remove(&self, package_id: &str, force: bool) -> Result<()> {
+        validate_package_id(package_id)?;
         if !self.registry.is_installed(package_id)? {
             println!("Package '{package_id}' is not installed.");
             return Ok(());
@@ -1529,31 +1666,33 @@ impl PackageInstaller {
             })
             .unwrap_or_default();
 
+        for binary_name in &provided_binaries {
+            validate_binary_name(binary_name)?;
+        }
+
         let pkg_dir = self.config.packages_dir.join(package_id);
-        let pkg_resolved = std::fs::canonicalize(&pkg_dir).unwrap_or_else(|_| pkg_dir.clone());
+        let pkg_dir_is_real = match std::fs::symlink_metadata(&pkg_dir) {
+            Ok(metadata) if metadata.file_type().is_dir() => true,
+            Ok(_) => {
+                return Err(AsterError::Runtime(format!(
+                    "Refusing to remove '{package_id}': package path '{}' is not a real directory.",
+                    pkg_dir.display()
+                )));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => return Err(e.into()),
+        };
 
         for bin_name in &provided_binaries {
             let link_path = self.config.bin_dir.join(bin_name);
-            if exists_or_symlink(&link_path) {
-                match std::fs::canonicalize(&link_path) {
-                    Ok(target) => {
-                        if target.starts_with(&pkg_resolved)
-                            || target.starts_with(&pkg_dir)
-                            || !link_path.exists()
-                        {
-                            std::fs::remove_file(&link_path)?;
-                        }
-                    }
-                    Err(_) => {
-                        if link_path.is_symlink() {
-                            std::fs::remove_file(&link_path)?;
-                        }
-                    }
-                }
+            if exists_or_symlink(&link_path)
+                && self.symlink_points_to_package(&link_path, package_id)
+            {
+                std::fs::remove_file(&link_path)?;
             }
         }
 
-        if pkg_dir.exists() {
+        if pkg_dir_is_real {
             std::fs::remove_dir_all(&pkg_dir)?;
         }
 
@@ -1561,6 +1700,23 @@ impl PackageInstaller {
         self.config.log_history(&format!("Removed '{package_id}'"));
         println!("Successfully removed '{package_id}'.");
         Ok(())
+    }
+}
+
+/// Gets a safe asset filename without its query or fragment.
+fn download_filename_from_url(url: &str, package_id: &str) -> String {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    match path.rsplit('/').next() {
+        Some(name)
+            if !name.is_empty()
+                && name != "."
+                && name != ".."
+                && !name.contains('\\')
+                && !name.contains('\0') =>
+        {
+            name.to_string()
+        }
+        _ => format!("{package_id}.archive"),
     }
 }
 
@@ -1776,6 +1932,40 @@ fn detect_compression(file: std::fs::File) -> Result<Box<dyn Read>> {
     }
 }
 
+/// Infers a source archive extension from its type and URL path, ignoring
+/// query strings and fragments which are not part of the asset filename.
+fn source_archive_extension(src_type: &str, src_url: &str) -> &'static str {
+    let url_path = src_url.split(['?', '#']).next().unwrap_or(src_url);
+    if src_type == "zip" || url_path.ends_with(".zip") {
+        ".zip"
+    } else if src_type == "tar.xz"
+        || src_type == "txz"
+        || url_path.ends_with(".tar.xz")
+        || url_path.ends_with(".txz")
+    {
+        ".tar.xz"
+    } else {
+        ".tar.gz"
+    }
+}
+
+/// Rejects archive paths that could escape the extraction directory while
+/// allowing harmless filenames that happen to contain consecutive dots.
+fn is_safe_archive_entry_path(name: &str) -> bool {
+    if name.is_empty() || name.contains('\0') || name.contains('\\') {
+        return false;
+    }
+
+    let path = Path::new(name);
+    !path.is_absolute()
+        && path.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+}
+
 fn extract_tar(archive_path: &Path, dest: &Path) -> Result<()> {
     let file = std::fs::File::open(archive_path)?;
     let reader = detect_compression(file)?;
@@ -1784,7 +1974,7 @@ fn extract_tar(archive_path: &Path, dest: &Path) -> Result<()> {
         let mut entry = entry?;
         let path = entry.path()?.into_owned();
         let name = path.to_string_lossy().to_string();
-        if name.starts_with('/') || name.contains("..") {
+        if !is_safe_archive_entry_path(&name) {
             return Err(AsterError::Runtime(format!(
                 "Unsafe file path in archive: {name}"
             )));
@@ -1802,7 +1992,7 @@ fn extract_zip(archive_path: &Path, dest: &Path) -> Result<()> {
             .by_index(i)
             .map_err(|e| AsterError::Other(e.to_string()))?;
         let name = entry.name().to_string();
-        if name.starts_with('/') || name.contains("..") {
+        if !is_safe_archive_entry_path(&name) {
             return Err(AsterError::Runtime(format!(
                 "Unsafe file path in archive: {name}"
             )));
@@ -1870,5 +2060,174 @@ fn value_to_string_list(v: &Value) -> Vec<String> {
             .filter_map(|x| x.as_str().map(String::from))
             .collect(),
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod source_archive_extension_tests {
+    use super::source_archive_extension;
+
+    #[test]
+    fn infers_archive_type_without_url_query_or_fragment() {
+        assert_eq!(
+            source_archive_extension(
+                "url",
+                "https://example.invalid/source.zip?download=1#asset"
+            ),
+            ".zip"
+        );
+        assert_eq!(
+            source_archive_extension("archive", "https://example.invalid/source.tar.xz?mirror=1"),
+            ".tar.xz"
+        );
+        assert_eq!(
+            source_archive_extension("archive", "https://example.invalid/source.txz#download"),
+            ".tar.xz"
+        );
+        assert_eq!(
+            source_archive_extension("url", "https://example.invalid/source.tar.gz?download=1"),
+            ".tar.gz"
+        );
+        assert_eq!(
+            source_archive_extension("zip", "https://example.invalid/download?asset=source"),
+            ".zip"
+        );
+    }
+}
+
+#[cfg(test)]
+mod archive_path_tests {
+    use super::is_safe_archive_entry_path;
+
+    #[test]
+    fn rejects_archive_traversal_but_allows_dot_sequences_in_names() {
+        for path in [
+            "",
+            "/etc/passwd",
+            "../outside",
+            "nested/../outside",
+            r"..\outside",
+            r"nested\..\outside",
+            "embedded\0nul",
+        ] {
+            assert!(
+                !is_safe_archive_entry_path(path),
+                "should reject unsafe archive path {path:?}"
+            );
+        }
+
+        for path in [
+            "bin/aster",
+            "./bin/aster",
+            "share/doc/foo..bar",
+            "lib/foo..so",
+        ] {
+            assert!(
+                is_safe_archive_entry_path(path),
+                "should allow safe archive path {path:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod download_filename_tests {
+    use super::download_filename_from_url;
+
+    #[test]
+    fn strips_url_query_and_fragment_when_getting_archive_name() {
+        assert_eq!(
+            download_filename_from_url(
+                "https://example.invalid/releases/fastfetch.tar.gz?download=1#asset",
+                "fastfetch-bin"
+            ),
+            "fastfetch.tar.gz"
+        );
+        assert_eq!(
+            download_filename_from_url("https://example.invalid/releases/latest", "my-package"),
+            "latest"
+        );
+        assert_eq!(
+            download_filename_from_url("https://example.invalid/", "my-package"),
+            "my-package.archive"
+        );
+        assert_eq!(
+            download_filename_from_url("https://example.invalid/..", "my-package"),
+            "my-package.archive"
+        );
+    }
+}
+
+#[cfg(test)]
+mod failed_install_cleanup_tests {
+    use super::*;
+    use crate::catalogue::CatalogueManager;
+    use crate::config::AsterConfig;
+    use crate::registry::RegistryManager;
+
+    #[cfg(unix)]
+    #[test]
+    fn removes_command_links_before_deleting_failed_package_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = AsterConfig::with_root_dir(temp.path().join("aster"));
+        let registry = RegistryManager::new(config.clone()).unwrap();
+        let catalogue = CatalogueManager::new(config.clone()).unwrap();
+        let installer = PackageInstaller::new(config.clone(), registry, catalogue);
+
+        let package_dir = config.packages_dir.join("failed-pkg");
+        std::fs::create_dir_all(package_dir.join("bin")).unwrap();
+        std::fs::write(package_dir.join("bin/failed-command"), b"fake executable").unwrap();
+        let command_link = config.bin_dir.join("failed-command");
+        std::os::unix::fs::symlink(package_dir.join("bin/failed-command"), &command_link).unwrap();
+
+        installer.cleanup_failed_install("failed-pkg", &["failed-command".to_string()]);
+
+        assert!(!package_dir.exists());
+        assert!(
+            !exists_or_symlink(&command_link),
+            "failed install cleanup must not leave a dangling command symlink"
+        );
+    }
+
+    #[test]
+    fn rejects_unsafe_recorded_commands_before_moving_package_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = AsterConfig::with_root_dir(temp.path().join("aster"));
+        let registry = RegistryManager::new(config.clone()).unwrap();
+        let catalogue = CatalogueManager::new(config.clone()).unwrap();
+        let package_dir = config.packages_dir.join("bad-metadata-pkg");
+        std::fs::create_dir_all(package_dir.join("bin")).unwrap();
+        std::fs::write(package_dir.join("bin/app"), b"existing package").unwrap();
+
+        let registry_data = serde_json::json!({
+            "schema_version": 1,
+            "installed": {
+                "bad-metadata-pkg": {
+                    "name": "Bad Metadata Package",
+                    "version": "1.0.0",
+                    "type": "binary",
+                    "install_dir": "packages/bad-metadata-pkg",
+                    "installed_files": ["bin/app"],
+                    "provided_binaries": ["../outside"],
+                    "source_repository": "default"
+                }
+            }
+        });
+        config
+            .save_json_atomic(&config.packages_json, &registry_data)
+            .unwrap();
+
+        let installer = PackageInstaller::new(config.clone(), registry.clone(), catalogue);
+        let error = installer
+            .upgrade_package("bad-metadata-pkg", true, false)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("Invalid command name"));
+        assert!(package_dir.is_dir());
+        assert!(!config
+            .packages_dir
+            .join("bad-metadata-pkg.upgrade_backup")
+            .exists());
+        assert!(registry.is_installed("bad-metadata-pkg").unwrap());
     }
 }
