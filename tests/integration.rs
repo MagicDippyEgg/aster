@@ -1662,7 +1662,6 @@ fn test_build_env_ignores_symlinked_package_directories() {
     }
 }
 
-
 #[test]
 fn test_checksum_placeholder_does_not_disable_integrity_verification() {
     let f = Fixture::new();
