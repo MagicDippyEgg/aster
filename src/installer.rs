@@ -626,8 +626,8 @@ impl PackageInstaller {
         AsterError::Runtime(msg.join("\n"))
     }
 
-    /// Returns true only for a symlink whose lexical target is inside this
-    /// package's own directory or its preserved upgrade backup.
+    /// Returns true only when a symlink points inside an existing real package
+    /// directory or its preserved upgrade backup.
     fn symlink_points_to_package(&self, link_path: &Path, package_id: &str) -> bool {
         if !link_path.is_symlink() {
             return false;
@@ -641,14 +641,19 @@ impl PackageInstaller {
         } else {
             normalize_path_lexically(&raw_target)
         };
-        let package_dir = normalize_path_lexically(&self.config.packages_dir.join(package_id));
-        let backup_dir = normalize_path_lexically(
-            &self
-                .config
-                .packages_dir
-                .join(format!("{package_id}.upgrade_backup")),
-        );
-        target.starts_with(&package_dir) || target.starts_with(&backup_dir)
+        let package_dir = self.config.packages_dir.join(package_id);
+        let backup_dir = self
+            .config
+            .packages_dir
+            .join(format!("{package_id}.upgrade_backup"));
+
+        [package_dir, backup_dir].iter().any(|candidate| {
+            let is_real_directory = std::fs::symlink_metadata(candidate)
+                .map(|metadata| metadata.file_type().is_dir())
+                .unwrap_or(false);
+            is_real_directory
+                && target.starts_with(&normalize_path_lexically(candidate))
+        })
     }
 
     fn check_binary_conflicts(
@@ -742,21 +747,21 @@ impl PackageInstaller {
         self.install_binary_from(pkg_def, "default")
     }
 
-    /// Refuses to overwrite unregistered package directories or follow a
-    /// registered package path that is not a real directory.
-    fn ensure_install_target_available(&self, package_id: &str) -> Result<()> {
+    /// Returns false for an already-installed real package directory, making
+    /// direct installs idempotent rather than destructively reinstalling it.
+    fn ensure_install_target_available(&self, package_id: &str) -> Result<bool> {
         validate_package_id(package_id)?;
         let package_dir = self.config.packages_dir.join(package_id);
 
         if self.registry.is_installed(package_id)? {
             return match std::fs::symlink_metadata(&package_dir) {
-                Ok(metadata) if metadata.file_type().is_dir() => Ok(()),
+                Ok(metadata) if metadata.file_type().is_dir() => Ok(false),
                 Ok(_) => Err(AsterError::Runtime(format!(
-                    "Refusing to reinstall '{package_id}': registered package path '{}' is not a real directory.",
+                    "Refusing to install '{package_id}': registered package path '{}' is not a real directory.",
                     package_dir.display()
                 ))),
                 Err(e) => Err(AsterError::Runtime(format!(
-                    "Refusing to reinstall '{package_id}': registered package directory '{}' cannot be accessed: {e}",
+                    "Refusing to install '{package_id}': registered package directory '{}' cannot be accessed: {e}",
                     package_dir.display()
                 ))),
             };
@@ -768,7 +773,7 @@ impl PackageInstaller {
                 package_dir.display()
             )));
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Installs a binary package, recording `source_repository` in the registry.
@@ -779,7 +784,10 @@ impl PackageInstaller {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        self.ensure_install_target_available(&pkg_id)?;
+        if !self.ensure_install_target_available(&pkg_id)? {
+            println!("Package '{pkg_id}' is already installed; skipping duplicate install.");
+            return Ok(());
+        }
         let mut provided_binaries: Vec<String> = Vec::new();
         let result = self.do_install_binary(pkg_def, source_repository, &mut provided_binaries);
         if result.is_err() {
@@ -984,7 +992,10 @@ impl PackageInstaller {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        self.ensure_install_target_available(&pkg_id)?;
+        if !self.ensure_install_target_available(&pkg_id)? {
+            println!("Package '{pkg_id}' is already installed; skipping duplicate install.");
+            return Ok(());
+        }
         let mut provided_binaries: Vec<String> = Vec::new();
         let result = self.do_install_source(
             pkg_def,
@@ -1676,14 +1687,21 @@ impl PackageInstaller {
     }
 }
 
-/// Gets an asset's final path component without its query or fragment.
+/// Gets a safe asset filename without its query or fragment.
 fn download_filename_from_url(url: &str, package_id: &str) -> String {
     let path = url.split(['?', '#']).next().unwrap_or(url);
-    path.rsplit('/')
-        .next()
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("{package_id}.archive"))
+    match path.rsplit('/').next() {
+        Some(name)
+            if !name.is_empty()
+                && name != "."
+                && name != ".."
+                && !name.contains('\\')
+                && !name.contains('\0') =>
+        {
+            name.to_string()
+        }
+        _ => format!("{package_id}.archive"),
+    }
 }
 
 fn download_with_progress(
@@ -2014,6 +2032,10 @@ mod download_filename_tests {
         );
         assert_eq!(
             download_filename_from_url("https://example.invalid/", "my-package"),
+            "my-package.archive"
+        );
+        assert_eq!(
+            download_filename_from_url("https://example.invalid/..", "my-package"),
             "my-package.archive"
         );
     }
