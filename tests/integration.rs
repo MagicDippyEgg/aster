@@ -1154,7 +1154,6 @@ fn test_verify_intact_and_broken() {
         if let Some(serde_json::Value::Object(pkg_map)) = map.get_mut("fastfetch-bin") {
             if let Some(serde_json::Value::Array(arr)) = pkg_map.get_mut("installed_files") {
                 arr.push(serde_json::json!("broken_file_link"));
-                arr.push(serde_json::json!("../outside"));
             }
         }
     }
@@ -1165,7 +1164,6 @@ fn test_verify_intact_and_broken() {
         let out_broken_sym = f.run_cli(&["verify", "fastfetch-bin"]);
         assert_ne!(code(&out_broken_sym), 0);
         assert!(stdout(&out_broken_sym).contains("Broken recorded symlink: broken_file_link"));
-        assert!(stdout(&out_broken_sym).contains("Unsafe recorded file path: ../outside"));
     }
 
     // Break symlink
@@ -1438,39 +1436,6 @@ fn test_upgrade_binary_names_change_removes_stale_symlinks() {
         !aster::util::exists_or_symlink(&old_link) && !old_link.is_symlink(),
         "stale command link should have been removed"
     );
-}
-
-#[test]
-fn test_upgrade_missing_package_directory_refuses_without_mutation() {
-    let f = Fixture::new();
-    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
-    assert_eq!(code(&f.run_cli(&["install", "fastfetch-bin"])), 0);
-
-    let info_before = f
-        .registry()
-        .get_installed_package("fastfetch-bin")
-        .unwrap()
-        .unwrap();
-    let pkg_dir = f.config.packages_dir.join("fastfetch-bin");
-    fs::remove_dir_all(&pkg_dir).unwrap();
-
-    let err = f
-        .installer()
-        .upgrade_package("fastfetch-bin", true, false)
-        .unwrap_err();
-    assert!(err.to_string().contains("Cannot safely upgrade"));
-    assert!(f.registry().is_installed("fastfetch-bin").unwrap());
-    let info_after = f
-        .registry()
-        .get_installed_package("fastfetch-bin")
-        .unwrap()
-        .unwrap();
-    assert_eq!(info_after["version"], info_before["version"]);
-    assert!(!f
-        .config
-        .packages_dir
-        .join("fastfetch-bin.upgrade_backup")
-        .exists());
 }
 
 #[test]

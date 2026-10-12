@@ -2,9 +2,9 @@
 
 use crate::config::AsterConfig;
 use crate::error::Result;
-use crate::schema::{validate_package_id, validate_registry};
+use crate::schema::validate_registry;
 use serde_json::{json, Map, Value};
-use std::path::{Component, Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone)]
@@ -149,7 +149,6 @@ impl RegistryManager {
 
     /// Verifies intactness of an installed package, returning a list of issues found.
     pub fn verify_package(&self, package_id: &str) -> Result<Vec<String>> {
-        validate_package_id(package_id)?;
         let info = match self.get_installed_package(package_id)? {
             Some(i) => i,
             None => {
@@ -168,10 +167,6 @@ impl RegistryManager {
         } else if let Some(files) = info.get("installed_files").and_then(|v| v.as_array()) {
             for f in files {
                 if let Some(rel) = f.as_str() {
-                    if !is_safe_recorded_file_path(rel) {
-                        issues.push(format!("Unsafe recorded file path: {rel}"));
-                        continue;
-                    }
                     let fpath = pkg_dir.join(rel);
                     if !crate::util::exists_or_symlink(&fpath) {
                         issues.push(format!("Missing recorded file: {rel}"));
@@ -198,11 +193,9 @@ impl RegistryManager {
                             Err(_) => {
                                 if let Ok(raw_target) = std::fs::read_link(&link_path) {
                                     let raw_path = if raw_target.is_relative() {
-                                        crate::util::normalize_path_lexically(
-                                            &self.config.bin_dir.join(&raw_target),
-                                        )
+                                        self.config.bin_dir.join(&raw_target)
                                     } else {
-                                        crate::util::normalize_path_lexically(&raw_target)
+                                        raw_target
                                     };
                                     raw_path.starts_with(&pkg_resolved)
                                         || raw_path.starts_with(&pkg_dir)
@@ -234,14 +227,6 @@ impl RegistryManager {
         }
         Ok(())
     }
-}
-
-fn is_safe_recorded_file_path(path: &str) -> bool {
-    !path.is_empty()
-        && !path.contains('\0')
-        && Path::new(path)
-            .components()
-            .all(|component| matches!(component, Component::Normal(_)))
 }
 
 fn installed_map(registry: &Map<String, Value>) -> &Map<String, Value> {
