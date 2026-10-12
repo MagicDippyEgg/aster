@@ -1464,8 +1464,7 @@ fn download_with_progress(
             None,
             timeout,
             |downloaded, total| {
-                if total > 0 {
-                    let pct = (downloaded * 100) / total;
+                if let Some(pct) = (downloaded * 100).checked_div(total) {
                     if pct != last_pct.get() {
                         last_pct.set(pct);
                         if is_tty {

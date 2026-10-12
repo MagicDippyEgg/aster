@@ -185,7 +185,7 @@ impl RegistryManager {
                         issues.push(format!("Broken command symlink: bin/{bin_name}"));
                     } else {
                         let link_target = std::fs::canonicalize(&link_path).ok();
-                        let belongs = link_target.map_or(false, |t| {
+                        let belongs = link_target.is_some_and(|t| {
                             t.starts_with(&pkg_resolved) || t.starts_with(&pkg_dir)
                         });
                         if !belongs {
