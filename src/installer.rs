@@ -1118,17 +1118,7 @@ impl PackageInstaller {
                 }
             }
             "tar.gz" | "tar.xz" | "txz" | "zip" | "archive" | "url" => {
-                let ext = if src_type == "zip" || src_url.ends_with(".zip") {
-                    ".zip"
-                } else if src_type == "tar.xz"
-                    || src_type == "txz"
-                    || src_url.ends_with(".tar.xz")
-                    || src_url.ends_with(".txz")
-                {
-                    ".tar.xz"
-                } else {
-                    ".tar.gz"
-                };
+                let ext = source_archive_extension(&src_type, &src_url);
                 let dest_archive = self.config.downloads_cache.join(format!("{pkg_id}{ext}"));
 
                 let msg_prefix = format!("Downloading source archive for {pkg_id}...");
@@ -1942,6 +1932,23 @@ fn detect_compression(file: std::fs::File) -> Result<Box<dyn Read>> {
     }
 }
 
+/// Infers a source archive extension from its type and URL path, ignoring
+/// query strings and fragments which are not part of the asset filename.
+fn source_archive_extension(src_type: &str, src_url: &str) -> &'static str {
+    let url_path = src_url.split(['?', '#']).next().unwrap_or(src_url);
+    if src_type == "zip" || url_path.ends_with(".zip") {
+        ".zip"
+    } else if src_type == "tar.xz"
+        || src_type == "txz"
+        || url_path.ends_with(".tar.xz")
+        || url_path.ends_with(".txz")
+    {
+        ".tar.xz"
+    } else {
+        ".tar.gz"
+    }
+}
+
 /// Rejects archive paths that could escape the extraction directory while
 /// allowing harmless filenames that happen to contain consecutive dots.
 fn is_safe_archive_entry_path(name: &str) -> bool {
@@ -2053,6 +2060,38 @@ fn value_to_string_list(v: &Value) -> Vec<String> {
             .filter_map(|x| x.as_str().map(String::from))
             .collect(),
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod source_archive_extension_tests {
+    use super::source_archive_extension;
+
+    #[test]
+    fn infers_archive_type_without_url_query_or_fragment() {
+        assert_eq!(
+            source_archive_extension(
+                "url",
+                "https://example.invalid/source.zip?download=1#asset"
+            ),
+            ".zip"
+        );
+        assert_eq!(
+            source_archive_extension("archive", "https://example.invalid/source.tar.xz?mirror=1"),
+            ".tar.xz"
+        );
+        assert_eq!(
+            source_archive_extension("archive", "https://example.invalid/source.txz#download"),
+            ".tar.xz"
+        );
+        assert_eq!(
+            source_archive_extension("url", "https://example.invalid/source.tar.gz?download=1"),
+            ".tar.gz"
+        );
+        assert_eq!(
+            source_archive_extension("zip", "https://example.invalid/download?asset=source"),
+            ".zip"
+        );
     }
 }
 
