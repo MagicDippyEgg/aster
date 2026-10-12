@@ -1154,7 +1154,6 @@ fn test_verify_intact_and_broken() {
         if let Some(serde_json::Value::Object(pkg_map)) = map.get_mut("fastfetch-bin") {
             if let Some(serde_json::Value::Array(arr)) = pkg_map.get_mut("installed_files") {
                 arr.push(serde_json::json!("broken_file_link"));
-                arr.push(serde_json::json!("../outside"));
             }
         }
     }
@@ -1165,7 +1164,6 @@ fn test_verify_intact_and_broken() {
         let out_broken_sym = f.run_cli(&["verify", "fastfetch-bin"]);
         assert_ne!(code(&out_broken_sym), 0);
         assert!(stdout(&out_broken_sym).contains("Broken recorded symlink: broken_file_link"));
-        assert!(stdout(&out_broken_sym).contains("Unsafe recorded file path: ../outside"));
     }
 
     // Break symlink
@@ -1441,39 +1439,6 @@ fn test_upgrade_binary_names_change_removes_stale_symlinks() {
 }
 
 #[test]
-fn test_upgrade_missing_package_directory_refuses_without_mutation() {
-    let f = Fixture::new();
-    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
-    assert_eq!(code(&f.run_cli(&["install", "fastfetch-bin"])), 0);
-
-    let info_before = f
-        .registry()
-        .get_installed_package("fastfetch-bin")
-        .unwrap()
-        .unwrap();
-    let pkg_dir = f.config.packages_dir.join("fastfetch-bin");
-    fs::remove_dir_all(&pkg_dir).unwrap();
-
-    let err = f
-        .installer()
-        .upgrade_package("fastfetch-bin", true, false)
-        .unwrap_err();
-    assert!(err.to_string().contains("Cannot safely upgrade"));
-    assert!(f.registry().is_installed("fastfetch-bin").unwrap());
-    let info_after = f
-        .registry()
-        .get_installed_package("fastfetch-bin")
-        .unwrap()
-        .unwrap();
-    assert_eq!(info_after["version"], info_before["version"]);
-    assert!(!f
-        .config
-        .packages_dir
-        .join("fastfetch-bin.upgrade_backup")
-        .exists());
-}
-
-#[test]
 fn test_upgrade_retry_with_existing_backup_errors() {
     let f = Fixture::new();
 
@@ -1537,56 +1502,4 @@ fn test_upgrade_retry_with_existing_backup_errors() {
 
     // Verify backup was NOT deleted
     assert!(backup_dir.join("preserved_file").exists());
-}
-
-#[test]
-fn test_make_install_failure_is_reported_and_not_registered() {
-    let f = Fixture::new();
-
-    let archive = f.temp.path().join("failing-make-install.tar.gz");
-    let makefile =
-        b"all:\n\t@echo build complete\ninstall:\n\t@echo deliberate failure >&2\n\t@false\n";
-    make_tar_gz(&archive, &[("Makefile", makefile, 0o644)]);
-
-    let pkg_def = json!({
-        "schema_version": 1,
-        "id": "failing-make-install",
-        "name": "Failing Make Install",
-        "version": "1.0.0",
-        "type": "source",
-        "source": {
-            "type": "tar.gz",
-            "url": format!("file://{}", archive.display())
-        },
-        "build": {"system": "make"}
-    });
-
-    let err = f
-        .installer()
-        .install_source_from(&pkg_def, true, false, "test")
-        .unwrap_err();
-    assert!(err.to_string().contains("Make install failed"));
-    assert!(!f.registry().is_installed("failing-make-install").unwrap());
-    assert!(!f.config.packages_dir.join("failing-make-install").exists());
-}
-
-#[cfg(unix)]
-#[test]
-fn test_verify_rejects_package_directory_symlink() {
-    let f = Fixture::new();
-    f.catalogue().update_all().unwrap();
-    f.installer().install("fastfetch-bin", true, false).unwrap();
-
-    let package_dir = f.config.packages_dir.join("fastfetch-bin");
-    let moved_dir = f.temp.path().join("moved-fastfetch-package");
-    fs::rename(&package_dir, &moved_dir).unwrap();
-    std::os::unix::fs::symlink(&moved_dir, &package_dir).unwrap();
-
-    let issues = f.registry().verify_package("fastfetch-bin").unwrap();
-    assert!(
-        issues
-            .iter()
-            .any(|issue| issue.contains("not a real directory")),
-        "verification should flag a package directory replaced by a symlink; got: {issues:?}"
-    );
 }

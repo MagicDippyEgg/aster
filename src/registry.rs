@@ -2,9 +2,9 @@
 
 use crate::config::AsterConfig;
 use crate::error::Result;
-use crate::schema::{validate_package_id, validate_registry};
+use crate::schema::validate_registry;
 use serde_json::{json, Map, Value};
-use std::path::{Component, Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone)]
@@ -149,7 +149,6 @@ impl RegistryManager {
 
     /// Verifies intactness of an installed package, returning a list of issues found.
     pub fn verify_package(&self, package_id: &str) -> Result<Vec<String>> {
-        validate_package_id(package_id)?;
         let info = match self.get_installed_package(package_id)? {
             Some(i) => i,
             None => {
@@ -163,82 +162,24 @@ impl RegistryManager {
         let pkg_dir = self.config.packages_dir.join(package_id);
         let pkg_resolved = std::fs::canonicalize(&pkg_dir).unwrap_or_else(|_| pkg_dir.clone());
 
-        let package_dir_is_real = match std::fs::symlink_metadata(&pkg_dir) {
-            Ok(metadata) if metadata.file_type().is_dir() => true,
-            Ok(_) => {
-                issues.push(format!(
-                    "Package path is not a real directory: {}",
-                    pkg_dir.display()
-                ));
-                false
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                issues.push(format!("Missing package directory: {}", pkg_dir.display()));
-                false
-            }
-            Err(e) => {
-                issues.push(format!(
-                    "Cannot inspect package directory '{}': {e}",
-                    pkg_dir.display()
-                ));
-                false
-            }
-        };
-
-        if package_dir_is_real {
-            match info.get("installed_files").and_then(|v| v.as_array()) {
-                Some(files) => {
-                    for f in files {
-                        match f.as_str() {
-                            Some(rel) if !is_safe_recorded_file_path(rel) => {
-                                issues.push(format!("Unsafe recorded file path: {rel}"));
-                            }
-                            Some(rel) => {
-                                let fpath = pkg_dir.join(rel);
-                                if !crate::util::exists_or_symlink(&fpath) {
-                                    issues.push(format!("Missing recorded file: {rel}"));
-                                } else if fpath.is_symlink() && !fpath.exists() {
-                                    issues.push(format!("Broken recorded symlink: {rel}"));
-                                }
-                            }
-                            None => issues.push(
-                                "Invalid recorded file entry: expected a relative path string"
-                                    .to_string(),
-                            ),
-                        }
+        if !pkg_dir.exists() || !pkg_dir.is_dir() {
+            issues.push(format!("Missing package directory: {}", pkg_dir.display()));
+        } else if let Some(files) = info.get("installed_files").and_then(|v| v.as_array()) {
+            for f in files {
+                if let Some(rel) = f.as_str() {
+                    let fpath = pkg_dir.join(rel);
+                    if !crate::util::exists_or_symlink(&fpath) {
+                        issues.push(format!("Missing recorded file: {rel}"));
+                    } else if fpath.is_symlink() && !fpath.exists() {
+                        issues.push(format!("Broken recorded symlink: {rel}"));
                     }
                 }
-                None => issues.push("Missing or invalid installed file metadata".to_string()),
             }
         }
 
-        match info.get("provided_binaries").and_then(|v| v.as_array()) {
-            Some(bins) => {
-                for b in bins {
-                    let bin_name = match b.as_str() {
-                        Some(name)
-                            if !name.is_empty()
-                                && name != "."
-                                && name != ".."
-                                && !name.contains('/')
-                                && !name.contains('\\')
-                                && !name.contains('\0') =>
-                        {
-                            name
-                        }
-                        Some(name) => {
-                            issues.push(format!("Unsafe recorded command name: {name}"));
-                            continue;
-                        }
-                        None => {
-                            issues.push(
-                                "Invalid recorded command entry: expected a command name string"
-                                    .to_string(),
-                            );
-                            continue;
-                        }
-                    };
-
+        if let Some(bins) = info.get("provided_binaries").and_then(|v| v.as_array()) {
+            for b in bins {
+                if let Some(bin_name) = b.as_str() {
                     let link_path = self.config.bin_dir.join(bin_name);
                     if !crate::util::exists_or_symlink(&link_path) {
                         issues.push(format!("Missing command symlink: bin/{bin_name}"));
@@ -252,11 +193,9 @@ impl RegistryManager {
                             Err(_) => {
                                 if let Ok(raw_target) = std::fs::read_link(&link_path) {
                                     let raw_path = if raw_target.is_relative() {
-                                        crate::util::normalize_path_lexically(
-                                            &self.config.bin_dir.join(&raw_target),
-                                        )
+                                        self.config.bin_dir.join(&raw_target)
                                     } else {
-                                        crate::util::normalize_path_lexically(&raw_target)
+                                        raw_target
                                     };
                                     raw_path.starts_with(&pkg_resolved)
                                         || raw_path.starts_with(&pkg_dir)
@@ -273,7 +212,6 @@ impl RegistryManager {
                     }
                 }
             }
-            None => issues.push("Missing or invalid provided command metadata".to_string()),
         }
 
         Ok(issues)
@@ -289,14 +227,6 @@ impl RegistryManager {
         }
         Ok(())
     }
-}
-
-fn is_safe_recorded_file_path(path: &str) -> bool {
-    !path.is_empty()
-        && !path.contains('\0')
-        && Path::new(path)
-            .components()
-            .all(|component| matches!(component, Component::Normal(_)))
 }
 
 fn installed_map(registry: &Map<String, Value>) -> &Map<String, Value> {
