@@ -711,10 +711,11 @@ impl PackageInstaller {
         if build_dir.exists() {
             let _ = std::fs::remove_dir_all(&build_dir);
         }
-        if !self.registry.is_installed(pkg_id).unwrap_or(false) && final_package_dir.exists() {
-            let _ = std::fs::remove_dir_all(&final_package_dir);
-        }
+        let package_is_registered = self.registry.is_installed(pkg_id).unwrap_or(false);
 
+        // Remove links while the failed package directory still exists. Once its
+        // target directory is deleted, canonicalization cannot prove ownership
+        // and a dangling link could otherwise be left behind.
         if self.config.bin_dir.exists() {
             let binaries_to_check: std::collections::HashSet<&String> =
                 provided_binaries.iter().collect();
@@ -746,6 +747,10 @@ impl PackageInstaller {
                     }
                 }
             }
+        }
+
+        if !package_is_registered && final_package_dir.exists() {
+            let _ = std::fs::remove_dir_all(&final_package_dir);
         }
     }
 
@@ -2044,6 +2049,39 @@ mod download_filename_tests {
         assert_eq!(
             download_filename_from_url("https://example.invalid/..", "my-package"),
             "my-package.archive"
+        );
+    }
+}
+
+
+#[cfg(test)]
+mod failed_install_cleanup_tests {
+    use super::*;
+    use crate::catalogue::CatalogueManager;
+    use crate::config::AsterConfig;
+    use crate::registry::RegistryManager;
+
+    #[cfg(unix)]
+    #[test]
+    fn removes_command_links_before_deleting_failed_package_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = AsterConfig::with_root_dir(temp.path().join("aster"));
+        let registry = RegistryManager::new(config.clone()).unwrap();
+        let catalogue = CatalogueManager::new(config.clone()).unwrap();
+        let installer = PackageInstaller::new(config.clone(), registry, catalogue);
+
+        let package_dir = config.packages_dir.join("failed-pkg");
+        std::fs::create_dir_all(package_dir.join("bin")).unwrap();
+        std::fs::write(package_dir.join("bin/failed-command"), b"fake executable").unwrap();
+        let command_link = config.bin_dir.join("failed-command");
+        std::os::unix::fs::symlink(package_dir.join("bin/failed-command"), &command_link).unwrap();
+
+        installer.cleanup_failed_install("failed-pkg", &["failed-command".to_string()]);
+
+        assert!(!package_dir.exists());
+        assert!(
+            !exists_or_symlink(&command_link),
+            "failed install cleanup must not leave a dangling command symlink"
         );
     }
 }
