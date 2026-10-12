@@ -641,19 +641,26 @@ impl PackageInstaller {
         } else {
             normalize_path_lexically(&raw_target)
         };
-        let package_dir = self.config.packages_dir.join(package_id);
-        let backup_dir = self
-            .config
-            .packages_dir
-            .join(format!("{package_id}.upgrade_backup"));
+        let package_dir = normalize_path_lexically(&self.config.packages_dir.join(package_id));
+        let backup_dir = normalize_path_lexically(
+            &self
+                .config
+                .packages_dir
+                .join(format!("{package_id}.upgrade_backup")),
+        );
+        let package_dir_is_real = std::fs::symlink_metadata(&package_dir)
+            .map(|metadata| metadata.file_type().is_dir())
+            .unwrap_or(false);
+        let backup_dir_is_real = std::fs::symlink_metadata(&backup_dir)
+            .map(|metadata| metadata.file_type().is_dir())
+            .unwrap_or(false);
 
-        [package_dir, backup_dir].iter().any(|candidate| {
-            let is_real_directory = std::fs::symlink_metadata(candidate)
-                .map(|metadata| metadata.file_type().is_dir())
-                .unwrap_or(false);
-            is_real_directory
-                && target.starts_with(&normalize_path_lexically(candidate))
-        })
+        // During upgrades, the old absolute command symlinks still point at
+        // package_dir even though the package contents have been renamed to
+        // backup_dir. Only trust that path while a real package or backup
+        // directory exists.
+        (package_dir_is_real || backup_dir_is_real)
+            && (target.starts_with(&package_dir) || target.starts_with(&backup_dir))
     }
 
     fn check_binary_conflicts(
