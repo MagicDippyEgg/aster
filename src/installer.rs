@@ -327,13 +327,8 @@ impl PackageInstaller {
                 .unwrap_or_default();
 
             let pkg_resolved = std::fs::canonicalize(&pkg_dir).unwrap_or_else(|_| pkg_dir.clone());
-            let pkg_resolved_str = pkg_resolved.to_string_lossy().to_string();
-            let pkg_dir_str = pkg_dir.to_string_lossy().to_string();
-
             let backup_resolved =
                 std::fs::canonicalize(&backup_dir).unwrap_or_else(|_| backup_dir.clone());
-            let backup_resolved_str = backup_resolved.to_string_lossy().to_string();
-            let backup_dir_str = backup_dir.to_string_lossy().to_string();
 
             for old_bin in &old_binaries {
                 if !new_binaries.contains(old_bin) {
@@ -341,21 +336,22 @@ impl PackageInstaller {
                     if exists_or_symlink(&link_path) {
                         let belongs_to_package = match std::fs::canonicalize(&link_path) {
                             Ok(target) => {
-                                let target_str = target.to_string_lossy();
-                                target_str.starts_with(&pkg_resolved_str)
-                                    || target_str.starts_with(&pkg_dir_str)
-                                    || target_str.starts_with(&backup_resolved_str)
-                                    || target_str.starts_with(&backup_dir_str)
+                                target.starts_with(&pkg_resolved)
+                                    || target.starts_with(&pkg_dir)
+                                    || target.starts_with(&backup_resolved)
+                                    || target.starts_with(&backup_dir)
                             }
                             Err(_) => {
                                 if let Ok(raw_target) = std::fs::read_link(&link_path) {
-                                    let target_str = raw_target.to_string_lossy();
-                                    target_str.contains(&format!("packages/{package_id}"))
-                                        || target_str.contains(&format!(
-                                            "packages/{package_id}.upgrade_backup"
-                                        ))
-                                        || target_str.starts_with(&pkg_dir_str)
-                                        || target_str.starts_with(&backup_dir_str)
+                                    let raw_path = if raw_target.is_relative() {
+                                        self.config.bin_dir.join(&raw_target)
+                                    } else {
+                                        raw_target
+                                    };
+                                    raw_path.starts_with(&pkg_resolved)
+                                        || raw_path.starts_with(&pkg_dir)
+                                        || raw_path.starts_with(&backup_resolved)
+                                        || raw_path.starts_with(&backup_dir)
                                 } else {
                                     false
                                 }
@@ -622,7 +618,6 @@ impl PackageInstaller {
                 provided_binaries.iter().collect();
             let final_resolved = std::fs::canonicalize(&final_package_dir)
                 .unwrap_or_else(|_| final_package_dir.clone());
-            let final_resolved_str = final_resolved.to_string_lossy().to_string();
 
             if let Ok(entries) = std::fs::read_dir(&self.config.bin_dir) {
                 for entry in entries.flatten() {
@@ -631,7 +626,9 @@ impl PackageInstaller {
                     if exists_or_symlink(&link_path) {
                         match std::fs::canonicalize(&link_path) {
                             Ok(target) => {
-                                if target.to_string_lossy().starts_with(&final_resolved_str) {
+                                if target.starts_with(&final_resolved)
+                                    || target.starts_with(&final_package_dir)
+                                {
                                     let _ = std::fs::remove_file(&link_path);
                                 }
                             }
@@ -1501,14 +1498,14 @@ impl PackageInstaller {
 
         let pkg_dir = self.config.packages_dir.join(package_id);
         let pkg_resolved = std::fs::canonicalize(&pkg_dir).unwrap_or_else(|_| pkg_dir.clone());
-        let pkg_resolved_str = pkg_resolved.to_string_lossy().to_string();
 
         for bin_name in &provided_binaries {
             let link_path = self.config.bin_dir.join(bin_name);
             if exists_or_symlink(&link_path) {
                 match std::fs::canonicalize(&link_path) {
                     Ok(target) => {
-                        if target.to_string_lossy().starts_with(&pkg_resolved_str)
+                        if target.starts_with(&pkg_resolved)
+                            || target.starts_with(&pkg_dir)
                             || !link_path.exists()
                         {
                             std::fs::remove_file(&link_path)?;

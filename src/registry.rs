@@ -184,10 +184,24 @@ impl RegistryManager {
                     } else if !link_path.exists() {
                         issues.push(format!("Broken command symlink: bin/{bin_name}"));
                     } else {
-                        let link_target = std::fs::canonicalize(&link_path).ok();
-                        let belongs = link_target.is_some_and(|t| {
-                            t.starts_with(&pkg_resolved) || t.starts_with(&pkg_dir)
-                        });
+                        let belongs = match std::fs::canonicalize(&link_path) {
+                            Ok(target) => {
+                                target.starts_with(&pkg_resolved) || target.starts_with(&pkg_dir)
+                            }
+                            Err(_) => {
+                                if let Ok(raw_target) = std::fs::read_link(&link_path) {
+                                    let raw_path = if raw_target.is_relative() {
+                                        self.config.bin_dir.join(&raw_target)
+                                    } else {
+                                        raw_target
+                                    };
+                                    raw_path.starts_with(&pkg_resolved)
+                                        || raw_path.starts_with(&pkg_dir)
+                                } else {
+                                    false
+                                }
+                            }
+                        };
                         if !belongs {
                             issues.push(format!(
                                 "Command symlink bin/{bin_name} no longer points to package '{package_id}'"
