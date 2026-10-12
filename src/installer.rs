@@ -273,10 +273,15 @@ impl PackageInstaller {
         let old_info = self
             .registry
             .get_installed_package(package_id)?
-            .ok_or_else(|| AsterError::Runtime(format!("Package '{package_id}' is not installed.")))?;
+            .ok_or_else(|| {
+                AsterError::Runtime(format!("Package '{package_id}' is not installed."))
+            })?;
 
         let pkg_dir = self.config.packages_dir.join(package_id);
-        let backup_dir = self.config.packages_dir.join(format!("{package_id}.upgrade_backup"));
+        let backup_dir = self
+            .config
+            .packages_dir
+            .join(format!("{package_id}.upgrade_backup"));
 
         if backup_dir.exists() {
             let _ = std::fs::remove_dir_all(&backup_dir);

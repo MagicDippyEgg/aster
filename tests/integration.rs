@@ -1229,12 +1229,19 @@ fn test_safe_upgrade_and_rollback() {
     );
     f.catalogue().update_all().unwrap();
 
-    let err = f.installer().upgrade_package("mypkg", true, false).unwrap_err();
+    let err = f
+        .installer()
+        .upgrade_package("mypkg", true, false)
+        .unwrap_err();
     assert!(err.to_string().contains("Upgrade failed"));
 
     // Verify rollback restored v1.0.0
     assert!(f.registry().is_installed("mypkg").unwrap());
-    let info = f.registry().get_installed_package("mypkg").unwrap().unwrap();
+    let info = f
+        .registry()
+        .get_installed_package("mypkg")
+        .unwrap()
+        .unwrap();
     assert_eq!(info["version"], "1.0.0");
     assert!(bin_link.exists());
     assert!(f.config.packages_dir.join("mypkg").exists());
