@@ -1154,6 +1154,7 @@ fn test_verify_intact_and_broken() {
         if let Some(serde_json::Value::Object(pkg_map)) = map.get_mut("fastfetch-bin") {
             if let Some(serde_json::Value::Array(arr)) = pkg_map.get_mut("installed_files") {
                 arr.push(serde_json::json!("broken_file_link"));
+                arr.push(serde_json::json!("../outside"));
             }
         }
     }
@@ -1164,6 +1165,7 @@ fn test_verify_intact_and_broken() {
         let out_broken_sym = f.run_cli(&["verify", "fastfetch-bin"]);
         assert_ne!(code(&out_broken_sym), 0);
         assert!(stdout(&out_broken_sym).contains("Broken recorded symlink: broken_file_link"));
+        assert!(stdout(&out_broken_sym).contains("Unsafe recorded file path: ../outside"));
     }
 
     // Break symlink

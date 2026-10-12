@@ -5,6 +5,7 @@ use crate::config::{get_build_env, AsterConfig};
 use crate::error::{AsterError, Result};
 use crate::registry::RegistryManager;
 use crate::resolver::DependencyResolver;
+use crate::schema::validate_package_id;
 use crate::util::normalize_path_lexically;
 use crate::util::{
     collect_files, exists_or_symlink, find_file, is_executable, py_get_bool, py_str, set_mode,
@@ -265,6 +266,7 @@ impl PackageInstaller {
 
     /// Upgrades an installed package safely, preserving the previous version and rolling back on failure.
     pub fn upgrade_package(&self, package_id: &str, auto_yes: bool, verbose: bool) -> Result<()> {
+        validate_package_id(package_id)?;
         if !self.registry.is_installed(package_id)? {
             return Err(AsterError::Runtime(format!(
                 "Package '{package_id}' is not installed."
@@ -1522,6 +1524,7 @@ impl PackageInstaller {
 
     /// Removes an installed package.
     pub fn remove(&self, package_id: &str, force: bool) -> Result<()> {
+        validate_package_id(package_id)?;
         if !self.registry.is_installed(package_id)? {
             println!("Package '{package_id}' is not installed.");
             return Ok(());
