@@ -214,9 +214,7 @@ pub fn get_build_env(
                     continue;
                 }
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name.ends_with(".upgrade_backup")
-                    && !installed_package_ids.contains_key(&name)
-                {
+                if name.ends_with(".upgrade_backup") && !installed_package_ids.contains_key(&name) {
                     continue;
                 }
                 prefix_dirs.push(path);
