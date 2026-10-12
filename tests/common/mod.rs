@@ -88,8 +88,8 @@ impl Fixture {
                 "type": "binary",
                 "description": "Precompiled fastfetch",
                 "downloads": {
-                    "linux-x86_64": {"url": format!("file://{}", fastfetch_archive.display())},
-                    "linux-aarch64": {"url": format!("file://{}", fastfetch_archive.display())}
+                    "linux-x86_64": {"url": format!("file://{}", fastfetch_archive.display()), "sha256": "EXPECTED_SHA256"},
+                    "linux-aarch64": {"url": format!("file://{}", fastfetch_archive.display()), "sha256": "EXPECTED_SHA256"}
                 },
                 "supported_platforms": ["linux-x86_64", "linux-aarch64"]
             }),
