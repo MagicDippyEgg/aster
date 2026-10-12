@@ -1621,8 +1621,15 @@ fn test_remove_rejects_unsafe_command_metadata_without_deleting_external_symlink
 
     let mut registry = f.registry().load_registry().unwrap();
     let installed = registry["installed"].as_object_mut().unwrap();
-    let package = installed.get_mut("fastfetch-bin").unwrap().as_object_mut().unwrap();
-    package.insert("provided_binaries".to_string(), json!(["../external-dangling-link"]));
+    let package = installed
+        .get_mut("fastfetch-bin")
+        .unwrap()
+        .as_object_mut()
+        .unwrap();
+    package.insert(
+        "provided_binaries".to_string(),
+        json!(["../external-dangling-link"]),
+    );
     f.registry().save_registry(&registry).unwrap();
 
     let err = f.installer().remove("fastfetch-bin", true).unwrap_err();
