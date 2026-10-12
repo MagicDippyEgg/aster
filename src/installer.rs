@@ -2053,7 +2053,6 @@ mod download_filename_tests {
     }
 }
 
-
 #[cfg(test)]
 mod failed_install_cleanup_tests {
     use super::*;
