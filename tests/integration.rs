@@ -1407,7 +1407,7 @@ fn test_upgrade_binary_names_change_removes_stale_symlinks() {
     let new_link = f.config.bin_dir.join("newcmd");
     assert!(new_link.exists());
     assert!(
-        !old_link.exists(),
+        !aster::util::exists_or_symlink(&old_link) && !old_link.is_symlink(),
         "stale command link should have been removed"
     );
 }

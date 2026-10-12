@@ -326,6 +326,10 @@ impl PackageInstaller {
                 })
                 .unwrap_or_default();
 
+            let pkg_resolved = std::fs::canonicalize(&pkg_dir).unwrap_or_else(|_| pkg_dir.clone());
+            let pkg_resolved_str = pkg_resolved.to_string_lossy().to_string();
+            let pkg_dir_str = pkg_dir.to_string_lossy().to_string();
+
             let backup_resolved =
                 std::fs::canonicalize(&backup_dir).unwrap_or_else(|_| backup_dir.clone());
             let backup_resolved_str = backup_resolved.to_string_lossy().to_string();
@@ -335,23 +339,29 @@ impl PackageInstaller {
                 if !new_binaries.contains(old_bin) {
                     let link_path = self.config.bin_dir.join(old_bin);
                     if exists_or_symlink(&link_path) {
-                        let matches_backup = match std::fs::canonicalize(&link_path) {
+                        let belongs_to_package = match std::fs::canonicalize(&link_path) {
                             Ok(target) => {
                                 let target_str = target.to_string_lossy();
-                                target_str.starts_with(&backup_resolved_str)
+                                target_str.starts_with(&pkg_resolved_str)
+                                    || target_str.starts_with(&pkg_dir_str)
+                                    || target_str.starts_with(&backup_resolved_str)
                                     || target_str.starts_with(&backup_dir_str)
                             }
                             Err(_) => {
                                 if let Ok(raw_target) = std::fs::read_link(&link_path) {
                                     let target_str = raw_target.to_string_lossy();
-                                    target_str.contains(".upgrade_backup")
+                                    target_str.contains(&format!("packages/{package_id}"))
+                                        || target_str.contains(&format!(
+                                            "packages/{package_id}.upgrade_backup"
+                                        ))
+                                        || target_str.starts_with(&pkg_dir_str)
                                         || target_str.starts_with(&backup_dir_str)
                                 } else {
                                     false
                                 }
                             }
                         };
-                        if matches_backup {
+                        if belongs_to_package {
                             let _ = std::fs::remove_file(&link_path);
                         }
                     }
@@ -367,18 +377,31 @@ impl PackageInstaller {
 
             self.cleanup_failed_install(package_id, &old_binaries);
 
+            let mut rollback_errors = Vec::new();
+
             if backup_dir.exists() {
-                let _ = std::fs::rename(&backup_dir, &pkg_dir);
+                if let Err(e) = std::fs::rename(&backup_dir, &pkg_dir) {
+                    rollback_errors.push(format!("failed to restore package directory: {e}"));
+                }
             }
 
             if pkg_dir.exists() {
-                let _ = self.create_symlinks(&pkg_dir, &old_binaries);
+                if let Err(e) = self.create_symlinks(&pkg_dir, &old_binaries) {
+                    rollback_errors.push(format!("failed to restore command symlinks: {e}"));
+                }
             }
 
-            if let Ok(mut reg) = self.registry.load_registry() {
-                if let Some(Value::Object(map)) = reg.get_mut("installed") {
-                    map.insert(package_id.to_string(), old_info);
-                    let _ = self.registry.save_registry(&reg);
+            match self.registry.load_registry() {
+                Ok(mut reg) => {
+                    if let Some(Value::Object(map)) = reg.get_mut("installed") {
+                        map.insert(package_id.to_string(), old_info);
+                        if let Err(e) = self.registry.save_registry(&reg) {
+                            rollback_errors.push(format!("failed to restore registry entry: {e}"));
+                        }
+                    }
+                }
+                Err(e) => {
+                    rollback_errors.push(format!("failed to load registry during rollback: {e}"));
                 }
             }
 
@@ -386,9 +409,18 @@ impl PackageInstaller {
                 let _ = std::fs::remove_dir_all(&backup_dir);
             }
 
-            let err_msg = match install_res {
-                Err(e) => format!("Upgrade failed for '{package_id}': {e}. Rolled back to previous version."),
-                Ok(()) => format!("Upgrade failed for '{package_id}': replacement package was not registered. Rolled back to previous version."),
+            let install_err_desc = match install_res {
+                Err(e) => format!("{e}"),
+                Ok(()) => "replacement package was not registered".to_string(),
+            };
+
+            let err_msg = if rollback_errors.is_empty() {
+                format!("Upgrade failed for '{package_id}': {install_err_desc}. Rolled back to previous version.")
+            } else {
+                format!(
+                    "Upgrade failed for '{package_id}': {install_err_desc}. Rollback warning(s): {}.",
+                    rollback_errors.join("; ")
+                )
             };
             Err(AsterError::Runtime(err_msg))
         }
