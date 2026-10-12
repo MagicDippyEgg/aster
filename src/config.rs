@@ -5,9 +5,10 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-pub const USER_AGENT: &str = "Aster-PackageManager/0.2.2";
+pub const USER_AGENT: &str = "Aster-PackageManager/0.2.3";
 
 pub fn default_aster_home() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
@@ -87,6 +88,74 @@ pub fn fetch_url_to_file(
         fs::create_dir_all(parent)?;
     }
     fs::write(dest_path, data)?;
+    Ok(())
+}
+
+/// Downloads content from a URL directly to `dest_path`, reporting progress via callback.
+pub fn fetch_url_to_file_with_progress<F>(
+    url: &str,
+    dest_path: &Path,
+    headers: Option<&HashMap<String, String>>,
+    timeout: u64,
+    mut progress_cb: F,
+) -> Result<()>
+where
+    F: FnMut(u64, u64),
+{
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout))
+        .build()
+        .map_err(|e| AsterError::Http(e.to_string()))?;
+
+    let mut req = client.get(url);
+    match headers {
+        Some(h) => {
+            for (k, v) in h {
+                let key = reqwest::header::HeaderName::from_bytes(k.as_bytes())
+                    .map_err(|e| AsterError::Http(e.to_string()))?;
+                let val = reqwest::header::HeaderValue::from_str(v)
+                    .map_err(|e| AsterError::Http(e.to_string()))?;
+                req = req.header(key, val);
+            }
+        }
+        None => {
+            let ua = reqwest::header::HeaderValue::from_str(USER_AGENT)
+                .map_err(|e| AsterError::Http(e.to_string()))?;
+            req = req.header(reqwest::header::USER_AGENT, ua);
+        }
+    }
+
+    let resp = req.send().map_err(|e| AsterError::Http(e.to_string()))?;
+    let mut resp = resp
+        .error_for_status()
+        .map_err(|e| AsterError::Http(e.to_string()))?;
+
+    let total = resp.content_length().unwrap_or(0);
+
+    if let Some(parent) = dest_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut file = fs::File::create(dest_path)?;
+    let mut buffer = [0u8; 16384];
+    let mut downloaded: u64 = 0;
+
+    if total > 0 {
+        progress_cb(0, total);
+    }
+
+    loop {
+        let n = resp.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        file.write_all(&buffer[..n])?;
+        downloaded += n as u64;
+        if total > 0 {
+            progress_cb(downloaded, total);
+        }
+    }
+
     Ok(())
 }
 
@@ -362,6 +431,21 @@ impl AsterConfig {
             Value::Object(map) => Ok(map),
             _ => Ok(Map::new()),
         }
+    }
+
+    /// Appends a timestamped history entry to `history.log`.
+    pub fn log_history(&self, message: &str) {
+        let history_file = self.logs_dir.join("history.log");
+        if let Some(parent) = history_file.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let timestamp = crate::util::current_timestamp();
+        let line = format!("[{timestamp}] {message}\n");
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&history_file)
+            .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
     }
 }
 

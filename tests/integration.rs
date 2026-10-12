@@ -173,7 +173,7 @@ fn test_internal_complete() {
     assert!(stdout_repos.contains("default"));
     assert!(!stdout_repos.contains('\t'));
 
-    f.installer().install("fastfetch-bin", true).unwrap();
+    f.installer().install("fastfetch-bin", true, false).unwrap();
 
     let out_inst = f.run_cli(&["_complete", "installed"]);
     assert_eq!(code(&out_inst), 0);
@@ -280,7 +280,7 @@ fn test_missing_declared_executable_validation() {
         "build": {"system": "cargo"}
     });
 
-    let err = installer.install_source(&fd_def, true).unwrap_err();
+    let err = installer.install_source(&fd_def, true, false).unwrap_err();
     assert!(err
         .to_string()
         .contains("Declared executable 'fd' was not produced"));
@@ -323,7 +323,7 @@ fn test_cargo_detection_system_vs_isolated() {
         "build": {"system": "cargo"}
     });
 
-    installer.install_source(&fd_def, true).unwrap();
+    installer.install_source(&fd_def, true, false).unwrap();
 
     let envs = exec.envs();
     let build_env = &envs[0];
@@ -404,7 +404,7 @@ fn test_install_tar_xz_binary_and_source() {
         "source": {"type": "tar.xz", "url": format!("file://{}", src_tar_xz.display())},
         "build": {"system": "make"}
     });
-    installer.install_source(&src_pkg_def, true).unwrap();
+    installer.install_source(&src_pkg_def, true, false).unwrap();
     assert!(registry.is_installed("xzsrc-src").unwrap());
     assert!(f.config.bin_dir.join("xzsrc").exists());
 }
@@ -496,7 +496,7 @@ fn test_cargo_custom_args_builds_declared_workspace_executables() {
         "executables": ["yazi", "ya"]
     });
 
-    installer.install_source(&package, true).unwrap();
+    installer.install_source(&package, true, false).unwrap();
 
     let commands = exec.commands();
     assert_eq!(
@@ -724,7 +724,9 @@ fn test_empty_build_steps_falls_through_to_cargo() {
         "executables": ["emptysteps"]
     });
 
-    installer.install_source(&def, true).unwrap();
+    installer.install_source(&def, true, false).unwrap();
+    installer.install_source(&def, true, false).unwrap();
+    installer.install_source(&def, true, false).unwrap();
 
     let commands = exec.commands();
     assert!(
@@ -855,7 +857,7 @@ fn test_install_records_actual_source_repository() {
 
     f.catalogue().update_all().unwrap();
 
-    f.installer().install("comm-pkg", true).unwrap();
+    f.installer().install("comm-pkg", true, false).unwrap();
 
     let info = f
         .registry()
@@ -907,7 +909,7 @@ fn test_source_discovery_ignores_git_hook_samples() {
         "build": {"system": "make"}
     });
 
-    installer.install_source(&def, true).unwrap();
+    installer.install_source(&def, true, false).unwrap();
 
     let provided = provided_binaries(&f, "example-src");
     assert!(
@@ -967,7 +969,7 @@ fn test_source_discovery_prefers_staging_over_source_tree() {
         "build": {"system": "make"}
     });
 
-    installer.install_source(&def, true).unwrap();
+    installer.install_source(&def, true, false).unwrap();
 
     assert_eq!(
         provided_binaries(&f, "staged-src"),
@@ -1027,12 +1029,56 @@ fn test_tree_and_cloc_style_packages_do_not_conflict_over_git_hooks() {
         "build": {"steps": ["chmod +x cloc"]}
     });
 
-    installer.install_source(&tree_def, true).unwrap();
-    installer.install_source(&cloc_def, true).unwrap();
+    installer.install_source(&tree_def, true, false).unwrap();
+    installer.install_source(&cloc_def, true, false).unwrap();
 
     assert_eq!(provided_binaries(&f, "tree-src"), vec!["tree".to_string()]);
     assert_eq!(provided_binaries(&f, "cloc-src"), vec!["cloc".to_string()]);
     assert!(f.config.bin_dir.join("tree").exists());
     assert!(f.config.bin_dir.join("cloc").exists());
     assert!(!f.config.bin_dir.join("applypatch-msg.sample").exists());
+}
+
+#[test]
+fn test_history_recording() {
+    let f = Fixture::new();
+
+    let out = f.run_cli(&["history"]);
+    assert_eq!(code(&out), 0);
+    assert!(stdout(&out).contains("No history recorded yet."));
+
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+    assert_eq!(code(&f.run_cli(&["install", "fastfetch-bin"])), 0);
+
+    let out_hist = f.run_cli(&["history"]);
+    assert_eq!(code(&out_hist), 0);
+    let hist_text = stdout(&out_hist);
+    assert!(hist_text.contains("Installed 'fastfetch-bin' version 2.30.0"));
+
+    assert_eq!(code(&f.run_cli(&["remove", "fastfetch-bin"])), 0);
+
+    let out_hist2 = f.run_cli(&["history"]);
+    assert_eq!(code(&out_hist2), 0);
+    let hist_text2 = stdout(&out_hist2);
+    assert!(hist_text2.contains("Installed 'fastfetch-bin' version 2.30.0"));
+    assert!(hist_text2.contains("Removed 'fastfetch-bin'"));
+}
+
+#[test]
+fn test_install_verbose_flags() {
+    let f = Fixture::new();
+
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+
+    let out_v = f.run_cli(&["install", "htop-src", "-y", "-v"]);
+    assert_eq!(code(&out_v), 0);
+    let stdout_v = stdout(&out_v);
+    assert!(stdout_v.contains("$ mkdir -p staging_bin"));
+
+    assert_eq!(code(&f.run_cli(&["remove", "htop-src"])), 0);
+
+    let out_verbose = f.run_cli(&["install", "htop-src", "-y", "-verbose"]);
+    assert_eq!(code(&out_verbose), 0);
+    let stdout_verb = stdout(&out_verbose);
+    assert!(stdout_verb.contains("$ mkdir -p staging_bin"));
 }
