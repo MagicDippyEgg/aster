@@ -377,7 +377,10 @@ impl PackageInstaller {
 
             if backup_dir.exists() {
                 if let Err(e) = std::fs::rename(&backup_dir, &pkg_dir) {
-                    rollback_errors.push(format!("failed to restore package directory: {e}"));
+                    rollback_errors.push(format!(
+                        "failed to restore package directory ({e}); backup preserved at '{}' for manual recovery",
+                        backup_dir.display()
+                    ));
                 }
             }
 
@@ -401,7 +404,11 @@ impl PackageInstaller {
                 }
             }
 
-            if backup_dir.exists() {
+            if backup_dir.exists()
+                && !rollback_errors
+                    .iter()
+                    .any(|e| e.contains("failed to restore package directory"))
+            {
                 let _ = std::fs::remove_dir_all(&backup_dir);
             }
 

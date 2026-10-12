@@ -1143,6 +1143,29 @@ fn test_verify_intact_and_broken() {
     assert_eq!(code(&out_single), 0);
     assert!(stdout(&out_single).contains("Package 'fastfetch-bin' is intact."));
 
+    // Add a broken symlink inside package directory recorded as installed_file
+    let pkg_dir = f.config.packages_dir.join("fastfetch-bin");
+    let broken_link = pkg_dir.join("broken_file_link");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(pkg_dir.join("nonexistent_target"), &broken_link).unwrap();
+
+    let mut reg = f.registry().load_registry().unwrap();
+    if let Some(serde_json::Value::Object(map)) = reg.get_mut("installed") {
+        if let Some(serde_json::Value::Object(pkg_map)) = map.get_mut("fastfetch-bin") {
+            if let Some(serde_json::Value::Array(arr)) = pkg_map.get_mut("installed_files") {
+                arr.push(serde_json::json!("broken_file_link"));
+            }
+        }
+    }
+    f.registry().save_registry(&reg).unwrap();
+
+    #[cfg(unix)]
+    {
+        let out_broken_sym = f.run_cli(&["verify", "fastfetch-bin"]);
+        assert_ne!(code(&out_broken_sym), 0);
+        assert!(stdout(&out_broken_sym).contains("Broken recorded symlink: broken_file_link"));
+    }
+
     // Break symlink
     let link_path = f.config.bin_dir.join("fastfetch");
     fs::remove_file(&link_path).unwrap();
@@ -1150,6 +1173,9 @@ fn test_verify_intact_and_broken() {
     let out_broken = f.run_cli(&["verify", "fastfetch-bin"]);
     assert_ne!(code(&out_broken), 0);
     assert!(stdout(&out_broken).contains("Missing command symlink"));
+
+    let out_all_failed = f.run_cli(&["verify"]);
+    assert_ne!(code(&out_all_failed), 0);
 }
 
 #[test]

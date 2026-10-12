@@ -564,13 +564,19 @@ fn verify(registry: &RegistryManager, target_pkg: &str) -> crate::error::Result<
 
         let mut failed_count = 0;
         for pkg_id in installed.keys() {
-            if let Ok(issues) = registry.verify_package(pkg_id) {
-                if !issues.is_empty() {
-                    failed_count += 1;
-                    println!("Package '{pkg_id}' verification failed:");
-                    for issue in issues {
-                        println!("  - {issue}");
+            match registry.verify_package(pkg_id) {
+                Ok(issues) => {
+                    if !issues.is_empty() {
+                        failed_count += 1;
+                        println!("Package '{pkg_id}' verification failed:");
+                        for issue in issues {
+                            println!("  - {issue}");
+                        }
                     }
+                }
+                Err(e) => {
+                    failed_count += 1;
+                    println!("Package '{pkg_id}' verification error: {e}");
                 }
             }
         }

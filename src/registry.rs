@@ -170,6 +170,8 @@ impl RegistryManager {
                     let fpath = pkg_dir.join(rel);
                     if !crate::util::exists_or_symlink(&fpath) {
                         issues.push(format!("Missing recorded file: {rel}"));
+                    } else if fpath.is_symlink() && !fpath.exists() {
+                        issues.push(format!("Broken recorded symlink: {rel}"));
                     }
                 }
             }
