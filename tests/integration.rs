@@ -1637,3 +1637,27 @@ fn test_remove_rejects_unsafe_command_metadata_without_deleting_external_symlink
     assert!(f.registry().is_installed("fastfetch-bin").unwrap());
     assert!(f.config.bin_dir.join("fastfetch").exists());
 }
+
+
+#[cfg(unix)]
+#[test]
+fn test_build_env_ignores_symlinked_package_directories() {
+    let f = Fixture::new();
+    let external_prefix = f.temp.path().join("external-prefix");
+    fs::create_dir_all(external_prefix.join("bin")).unwrap();
+    fs::create_dir_all(external_prefix.join("include")).unwrap();
+
+    let package_link = f.config.packages_dir.join("external-package-link");
+    std::os::unix::fs::symlink(&external_prefix, &package_link).unwrap();
+
+    let env = aster::config::get_build_env(&f.config, None);
+    for variable in ["PATH", "CPATH", "LD_LIBRARY_PATH", "CMAKE_PREFIX_PATH"] {
+        if let Some(paths) = env.get(variable) {
+            assert!(
+                !paths.split(':').any(|path| path == package_link),
+                "{variable} should not include symlinked package directory {}",
+                package_link.display()
+            );
+        }
+    }
+}

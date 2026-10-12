@@ -832,12 +832,7 @@ impl PackageInstaller {
             .map(|s| s.to_string());
 
         let msg_prefix = format!("Downloading binary release for {pkg_id} ({platform_key})...");
-        let download_filename = url
-            .rsplit('/')
-            .next()
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("{pkg_id}.archive"));
+        let download_filename = download_filename_from_url(&url, &pkg_id);
         let dest_archive = self.config.downloads_cache.join(&download_filename);
 
         download_with_progress(&url, &dest_archive, &msg_prefix, 30)?;
@@ -1670,6 +1665,16 @@ impl PackageInstaller {
     }
 }
 
+/// Gets an asset's final path component without its query or fragment.
+fn download_filename_from_url(url: &str, package_id: &str) -> String {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    path.rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{package_id}.archive"))
+}
+
 fn download_with_progress(
     url: &str,
     dest_path: &Path,
@@ -1976,5 +1981,30 @@ fn value_to_string_list(v: &Value) -> Vec<String> {
             .filter_map(|x| x.as_str().map(String::from))
             .collect(),
         _ => Vec::new(),
+    }
+}
+
+
+#[cfg(test)]
+mod download_filename_tests {
+    use super::download_filename_from_url;
+
+    #[test]
+    fn strips_url_query_and_fragment_when_getting_archive_name() {
+        assert_eq!(
+            download_filename_from_url(
+                "https://example.invalid/releases/fastfetch.tar.gz?download=1#asset",
+                "fastfetch-bin"
+            ),
+            "fastfetch.tar.gz"
+        );
+        assert_eq!(
+            download_filename_from_url("https://example.invalid/releases/latest", "my-package"),
+            "latest"
+        );
+        assert_eq!(
+            download_filename_from_url("https://example.invalid/", "my-package"),
+            "my-package.archive"
+        );
     }
 }

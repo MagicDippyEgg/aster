@@ -209,10 +209,12 @@ pub fn get_build_env(
     if config.packages_dir.exists() {
         if let Ok(rd) = fs::read_dir(&config.packages_dir) {
             for entry in rd.flatten() {
-                let path = entry.path();
-                if !path.is_dir() {
+                // Do not follow symlinked package directories into arbitrary
+                // locations while building compiler/linker search paths.
+                if !entry.file_type().map(|ty| ty.is_dir()).unwrap_or(false) {
                     continue;
                 }
+                let path = entry.path();
                 let name = entry.file_name().to_string_lossy().to_string();
                 if name.ends_with(".upgrade_backup") && !installed_package_ids.contains_key(&name) {
                     continue;
