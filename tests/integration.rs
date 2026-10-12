@@ -1638,7 +1638,6 @@ fn test_remove_rejects_unsafe_command_metadata_without_deleting_external_symlink
     assert!(f.config.bin_dir.join("fastfetch").exists());
 }
 
-
 #[cfg(unix)]
 #[test]
 fn test_build_env_ignores_symlinked_package_directories() {
