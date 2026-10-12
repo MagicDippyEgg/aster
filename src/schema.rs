@@ -139,9 +139,23 @@ mod tests {
 
     #[test]
     fn command_and_repository_names_reject_path_components() {
-        for name in ["", ".", "..", "../escape", "pkg/escape", "pkg\\escape", "nul\0name"] {
-            assert!(validate_binary_name(name).is_err(), "should reject command {name:?}");
-            assert!(validate_repository_name(name).is_err(), "should reject repository {name:?}");
+        for name in [
+            "",
+            ".",
+            "..",
+            "../escape",
+            "pkg/escape",
+            "pkg\\escape",
+            "nul\0name",
+        ] {
+            assert!(
+                validate_binary_name(name).is_err(),
+                "should reject command {name:?}"
+            );
+            assert!(
+                validate_repository_name(name).is_err(),
+                "should reject repository {name:?}"
+            );
         }
         assert!(validate_binary_name("fastfetch").is_ok());
         assert!(validate_repository_name("community-x86_64").is_ok());
