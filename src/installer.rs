@@ -291,55 +291,106 @@ impl PackageInstaller {
             std::fs::rename(&pkg_dir, &backup_dir)?;
         }
 
-        let _ = self.registry.unregister_package(package_id);
-
-        let res = self.install(package_id, auto_yes, verbose);
-
-        match res {
-            Ok(()) => {
-                if backup_dir.exists() {
-                    let _ = std::fs::remove_dir_all(&backup_dir);
-                }
-                Ok(())
+        if let Err(e) = self.registry.unregister_package(package_id) {
+            if backup_dir.exists() {
+                let _ = std::fs::rename(&backup_dir, &pkg_dir);
             }
-            Err(e) => {
-                eprintln!("Upgrade failed for '{package_id}'. Rolling back to previous version...");
+            return Err(AsterError::Runtime(format!(
+                "Failed to unregister '{package_id}' before upgrade: {e}"
+            )));
+        }
 
-                let old_binaries: Vec<String> = old_info
-                    .get("provided_binaries")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|b| b.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+        let old_binaries: Vec<String> = old_info
+            .get("provided_binaries")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|b| b.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
 
-                self.cleanup_failed_install(package_id, &old_binaries);
+        let install_res = self.install(package_id, auto_yes, verbose);
+        let newly_installed = self.registry.is_installed(package_id).unwrap_or(false);
 
-                if backup_dir.exists() {
-                    let _ = std::fs::rename(&backup_dir, &pkg_dir);
-                }
+        if install_res.is_ok() && newly_installed {
+            let new_info = self.registry.get_installed_package(package_id)?;
+            let new_binaries: Vec<String> = new_info
+                .as_ref()
+                .and_then(|v| v.get("provided_binaries"))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|b| b.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
 
-                if pkg_dir.exists() {
-                    let _ = self.create_symlinks(&pkg_dir, &old_binaries);
-                }
+            let backup_resolved =
+                std::fs::canonicalize(&backup_dir).unwrap_or_else(|_| backup_dir.clone());
+            let backup_resolved_str = backup_resolved.to_string_lossy().to_string();
+            let backup_dir_str = backup_dir.to_string_lossy().to_string();
 
-                if let Ok(mut reg) = self.registry.load_registry() {
-                    if let Some(Value::Object(map)) = reg.get_mut("installed") {
-                        map.insert(package_id.to_string(), old_info);
-                        let _ = self.registry.save_registry(&reg);
+            for old_bin in &old_binaries {
+                if !new_binaries.contains(old_bin) {
+                    let link_path = self.config.bin_dir.join(old_bin);
+                    if exists_or_symlink(&link_path) {
+                        let matches_backup = match std::fs::canonicalize(&link_path) {
+                            Ok(target) => {
+                                let target_str = target.to_string_lossy();
+                                target_str.starts_with(&backup_resolved_str)
+                                    || target_str.starts_with(&backup_dir_str)
+                            }
+                            Err(_) => {
+                                if let Ok(raw_target) = std::fs::read_link(&link_path) {
+                                    let target_str = raw_target.to_string_lossy();
+                                    target_str.contains(".upgrade_backup")
+                                        || target_str.starts_with(&backup_dir_str)
+                                } else {
+                                    false
+                                }
+                            }
+                        };
+                        if matches_backup {
+                            let _ = std::fs::remove_file(&link_path);
+                        }
                     }
                 }
-
-                if backup_dir.exists() {
-                    let _ = std::fs::remove_dir_all(&backup_dir);
-                }
-
-                Err(AsterError::Runtime(format!(
-                    "Upgrade failed for '{package_id}': {e}. Rolled back to previous version."
-                )))
             }
+
+            if backup_dir.exists() {
+                let _ = std::fs::remove_dir_all(&backup_dir);
+            }
+            Ok(())
+        } else {
+            eprintln!("Upgrade failed for '{package_id}'. Rolling back to previous version...");
+
+            self.cleanup_failed_install(package_id, &old_binaries);
+
+            if backup_dir.exists() {
+                let _ = std::fs::rename(&backup_dir, &pkg_dir);
+            }
+
+            if pkg_dir.exists() {
+                let _ = self.create_symlinks(&pkg_dir, &old_binaries);
+            }
+
+            if let Ok(mut reg) = self.registry.load_registry() {
+                if let Some(Value::Object(map)) = reg.get_mut("installed") {
+                    map.insert(package_id.to_string(), old_info);
+                    let _ = self.registry.save_registry(&reg);
+                }
+            }
+
+            if backup_dir.exists() {
+                let _ = std::fs::remove_dir_all(&backup_dir);
+            }
+
+            let err_msg = match install_res {
+                Err(e) => format!("Upgrade failed for '{package_id}': {e}. Rolled back to previous version."),
+                Ok(()) => format!("Upgrade failed for '{package_id}': replacement package was not registered. Rolled back to previous version."),
+            };
+            Err(AsterError::Runtime(err_msg))
         }
     }
 
@@ -950,7 +1001,9 @@ impl PackageInstaller {
                     if staging_dir.exists() {
                         let _ = std::fs::remove_dir_all(&staging_dir);
                     }
-                    return Ok(());
+                    return Err(AsterError::Runtime(
+                        "Installation cancelled by user.".to_string(),
+                    ));
                 }
             }
 

@@ -1247,3 +1247,167 @@ fn test_safe_upgrade_and_rollback() {
     assert!(f.config.packages_dir.join("mypkg").exists());
     assert!(!f.config.packages_dir.join("mypkg.upgrade_backup").exists());
 }
+
+#[test]
+fn test_upgrade_cancelled_build_steps_rollback() {
+    let f = Fixture::new();
+
+    let repo_dir = f.temp.path().join("cancel_repo");
+    fs::create_dir_all(repo_dir.join("packages")).unwrap();
+
+    let v1_archive = f.temp.path().join("steps-1.0.0.tar.gz");
+    make_tar_gz(&v1_archive, &[("myscript", b"#!/bin/sh\necho v1", 0o755)]);
+
+    write_json(
+        &repo_dir.join("index.json"),
+        &json!({
+            "schema_version": 1,
+            "packages": {
+                "stepspkg": {"definition": "packages/stepspkg.json", "type": "source", "description": "Steps Pkg"}
+            }
+        }),
+    );
+    write_json(
+        &repo_dir.join("packages/stepspkg.json"),
+        &json!({
+            "schema_version": 1,
+            "id": "stepspkg",
+            "name": "stepspkg",
+            "version": "1.0.0",
+            "type": "source",
+            "source": {"type": "tar.gz", "url": format!("file://{}", v1_archive.display())},
+            "build": {"steps": ["chmod +x myscript"]},
+            "executables": ["myscript"]
+        }),
+    );
+
+    let repos = json!({
+        "schema_version": 1,
+        "repositories": {
+            "default": {"name": "default", "url": repo_dir.to_string_lossy(), "priority": 100}
+        }
+    });
+    f.config
+        .save_json_atomic(&f.config.repositories_json, &repos)
+        .unwrap();
+
+    f.catalogue().update_all().unwrap();
+    f.installer().install("stepspkg", true, false).unwrap();
+
+    assert!(f.config.bin_dir.join("myscript").exists());
+
+    // Update repo to v2 with custom steps. Without auto_yes (auto_yes=false) and non-interactive stdin ("n"),
+    // execution prompt will be declined.
+    write_json(
+        &repo_dir.join("packages/stepspkg.json"),
+        &json!({
+            "schema_version": 1,
+            "id": "stepspkg",
+            "name": "stepspkg",
+            "version": "2.0.0",
+            "type": "source",
+            "source": {"type": "tar.gz", "url": format!("file://{}", v1_archive.display())},
+            "build": {"steps": ["echo v2"]},
+            "executables": ["myscript"]
+        }),
+    );
+    f.catalogue().update_all().unwrap();
+
+    let err = f
+        .installer()
+        .upgrade_package("stepspkg", false, false)
+        .unwrap_err();
+    assert!(err.to_string().contains("cancelled"));
+
+    // Verify rollback restored v1.0.0 and package remains installed and usable
+    assert!(f.registry().is_installed("stepspkg").unwrap());
+    let info = f
+        .registry()
+        .get_installed_package("stepspkg")
+        .unwrap()
+        .unwrap();
+    assert_eq!(info["version"], "1.0.0");
+    assert!(f.config.bin_dir.join("myscript").exists());
+}
+
+#[test]
+fn test_upgrade_binary_names_change_removes_stale_symlinks() {
+    let f = Fixture::new();
+
+    let repo_dir = f.temp.path().join("bin_change_repo");
+    fs::create_dir_all(repo_dir.join("packages")).unwrap();
+
+    let v1_archive = f.temp.path().join("rename-1.0.0.tar.gz");
+    make_tar_gz(&v1_archive, &[("bin/oldcmd", b"#!/bin/sh\necho v1", 0o755)]);
+
+    write_json(
+        &repo_dir.join("index.json"),
+        &json!({
+            "schema_version": 1,
+            "packages": {
+                "renamepkg": {"definition": "packages/renamepkg.json", "type": "binary", "description": "Rename Pkg"}
+            }
+        }),
+    );
+    write_json(
+        &repo_dir.join("packages/renamepkg.json"),
+        &json!({
+            "schema_version": 1,
+            "id": "renamepkg",
+            "name": "renamepkg",
+            "version": "1.0.0",
+            "type": "binary",
+            "downloads": {
+                "linux-x86_64": {"url": format!("file://{}", v1_archive.display())},
+                "linux-aarch64": {"url": format!("file://{}", v1_archive.display())}
+            }
+        }),
+    );
+
+    let repos = json!({
+        "schema_version": 1,
+        "repositories": {
+            "default": {"name": "default", "url": repo_dir.to_string_lossy(), "priority": 100}
+        }
+    });
+    f.config
+        .save_json_atomic(&f.config.repositories_json, &repos)
+        .unwrap();
+
+    f.catalogue().update_all().unwrap();
+    f.installer().install("renamepkg", true, false).unwrap();
+
+    let old_link = f.config.bin_dir.join("oldcmd");
+    assert!(old_link.exists());
+
+    // Update repo to v2 providing newcmd instead of oldcmd
+    let v2_archive = f.temp.path().join("rename-2.0.0.tar.gz");
+    make_tar_gz(&v2_archive, &[("bin/newcmd", b"#!/bin/sh\necho v2", 0o755)]);
+
+    write_json(
+        &repo_dir.join("packages/renamepkg.json"),
+        &json!({
+            "schema_version": 1,
+            "id": "renamepkg",
+            "name": "renamepkg",
+            "version": "2.0.0",
+            "type": "binary",
+            "downloads": {
+                "linux-x86_64": {"url": format!("file://{}", v2_archive.display())},
+                "linux-aarch64": {"url": format!("file://{}", v2_archive.display())}
+            }
+        }),
+    );
+    f.catalogue().update_all().unwrap();
+
+    f.installer()
+        .upgrade_package("renamepkg", true, false)
+        .unwrap();
+
+    let new_link = f.config.bin_dir.join("newcmd");
+    assert!(new_link.exists());
+    assert!(
+        !old_link.exists(),
+        "stale command link should have been removed"
+    );
+}
