@@ -1591,7 +1591,6 @@ fn test_verify_rejects_package_directory_symlink() {
     );
 }
 
-
 #[test]
 fn test_install_does_not_overwrite_unmanaged_command_file() {
     let f = Fixture::new();
