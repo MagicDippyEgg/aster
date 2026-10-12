@@ -14,7 +14,7 @@ use regex::Regex;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -34,6 +34,7 @@ pub trait CommandExecutor: Send + Sync {
         argv: &[String],
         cwd: Option<&Path>,
         env: &HashMap<String, String>,
+        verbose: bool,
     ) -> std::io::Result<CommandOutput>;
 
     fn run_shell(
@@ -41,6 +42,7 @@ pub trait CommandExecutor: Send + Sync {
         script: &str,
         cwd: Option<&Path>,
         env: &HashMap<String, String>,
+        verbose: bool,
     ) -> std::io::Result<CommandOutput>;
 
     fn which(&self, name: &str, path: Option<&str>) -> Option<PathBuf>;
@@ -49,12 +51,58 @@ pub trait CommandExecutor: Send + Sync {
 /// Default executor backed by `std::process::Command`.
 pub struct SystemExecutor;
 
+fn run_cmd_verbose(mut cmd: Command) -> std::io::Result<CommandOutput> {
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn()?;
+
+    let stdout_handle = child.stdout.take();
+    let stderr_handle = child.stderr.take();
+
+    let stdout_thread = std::thread::spawn(move || {
+        let mut out = String::new();
+        if let Some(pipe) = stdout_handle {
+            let reader = BufReader::new(pipe);
+            for line in reader.lines().map_while(|l| l.ok()) {
+                println!("{line}");
+                out.push_str(&line);
+                out.push('\n');
+            }
+        }
+        out
+    });
+
+    let stderr_thread = std::thread::spawn(move || {
+        let mut err = String::new();
+        if let Some(pipe) = stderr_handle {
+            let reader = BufReader::new(pipe);
+            for line in reader.lines().map_while(|l| l.ok()) {
+                eprintln!("{line}");
+                err.push_str(&line);
+                err.push('\n');
+            }
+        }
+        err
+    });
+
+    let status = child.wait()?;
+    let stdout = stdout_thread.join().unwrap_or_default();
+    let stderr = stderr_thread.join().unwrap_or_default();
+
+    Ok(CommandOutput {
+        code: status.code().unwrap_or(-1),
+        stdout,
+        stderr,
+    })
+}
+
 impl CommandExecutor for SystemExecutor {
     fn run(
         &self,
         argv: &[String],
         cwd: Option<&Path>,
         env: &HashMap<String, String>,
+        verbose: bool,
     ) -> std::io::Result<CommandOutput> {
         let mut cmd = Command::new(&argv[0]);
         cmd.args(&argv[1..]);
@@ -62,12 +110,17 @@ impl CommandExecutor for SystemExecutor {
             cmd.current_dir(dir);
         }
         cmd.env_clear().envs(env);
-        let output = cmd.output()?;
-        Ok(CommandOutput {
-            code: output.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        })
+        if verbose {
+            println!("$ {}", argv.join(" "));
+            run_cmd_verbose(cmd)
+        } else {
+            let output = cmd.output()?;
+            Ok(CommandOutput {
+                code: output.status.code().unwrap_or(-1),
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            })
+        }
     }
 
     fn run_shell(
@@ -75,6 +128,7 @@ impl CommandExecutor for SystemExecutor {
         script: &str,
         cwd: Option<&Path>,
         env: &HashMap<String, String>,
+        verbose: bool,
     ) -> std::io::Result<CommandOutput> {
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(script);
@@ -82,12 +136,17 @@ impl CommandExecutor for SystemExecutor {
             cmd.current_dir(dir);
         }
         cmd.env_clear().envs(env);
-        let output = cmd.output()?;
-        Ok(CommandOutput {
-            code: output.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        })
+        if verbose {
+            println!("$ {script}");
+            run_cmd_verbose(cmd)
+        } else {
+            let output = cmd.output()?;
+            Ok(CommandOutput {
+                code: output.status.code().unwrap_or(-1),
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            })
+        }
     }
 
     fn which(&self, name: &str, path: Option<&str>) -> Option<PathBuf> {
@@ -147,7 +206,7 @@ impl PackageInstaller {
     }
 
     /// Installs a package and its dependencies by ID.
-    pub fn install(&self, package_id: &str, auto_yes: bool) -> Result<()> {
+    pub fn install(&self, package_id: &str, auto_yes: bool, verbose: bool) -> Result<()> {
         let resolver = DependencyResolver::new(self.catalogue.clone(), self.registry.clone());
         let install_plan = resolver
             .resolve_dependencies(package_id)
@@ -188,7 +247,7 @@ impl PackageInstaller {
                 .to_string();
             match pkg_type.as_str() {
                 "binary" => self.install_binary_from(&pkg_def, &source_repo)?,
-                "source" => self.install_source_from(&pkg_def, auto_yes, &source_repo)?,
+                "source" => self.install_source_from(&pkg_def, auto_yes, verbose, &source_repo)?,
                 other => {
                     return Err(AsterError::Runtime(format!(
                         "Unsupported package type '{other}' for package '{pkg}'."
@@ -443,7 +502,9 @@ impl PackageInstaller {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        println!("Downloading binary release for {pkg_id} ({platform_key})...");
+        let msg_prefix = format!("Downloading binary release for {pkg_id} ({platform_key})...");
+        let is_tty = std::io::stdout().is_terminal();
+
         let download_filename = url
             .rsplit('/')
             .next()
@@ -453,7 +514,32 @@ impl PackageInstaller {
         let dest_archive = self.config.downloads_cache.join(&download_filename);
 
         if url.starts_with("http://") || url.starts_with("https://") {
-            if let Err(e) = fetch_url_to_file(&url, &dest_archive, None, 30) {
+            let last_pct = std::cell::Cell::new(101u64);
+            let res = crate::config::fetch_url_to_file_with_progress(
+                &url,
+                &dest_archive,
+                None,
+                30,
+                |downloaded, total| {
+                    let pct = (downloaded * 100) / total;
+                    if pct != last_pct.get() {
+                        last_pct.set(pct);
+                        if is_tty {
+                            print!("\r{msg_prefix} {pct}%");
+                            let _ = std::io::stdout().flush();
+                        }
+                    }
+                },
+            );
+
+            if is_tty {
+                println!("\r{msg_prefix}        ");
+                let _ = std::io::stdout().flush();
+            } else {
+                println!("{msg_prefix}");
+            }
+
+            if let Err(e) = res {
                 if dest_archive.exists() {
                     let _ = std::fs::remove_file(&dest_archive);
                 }
@@ -462,6 +548,7 @@ impl PackageInstaller {
                 )));
             }
         } else {
+            println!("{msg_prefix}");
             let src_path = if let Some(rest) = url.strip_prefix("file://") {
                 PathBuf::from(rest)
             } else {
@@ -587,13 +674,15 @@ impl PackageInstaller {
             source_repository,
             None,
         )?;
+        self.config
+            .log_history(&format!("Installed '{pkg_id}' version {version}"));
         println!("Successfully installed '{pkg_id}' version {version}.");
         Ok(())
     }
 
     /// Installs a source package by cloning/downloading and building it.
-    pub fn install_source(&self, pkg_def: &Value, auto_yes: bool) -> Result<()> {
-        self.install_source_from(pkg_def, auto_yes, "default")
+    pub fn install_source(&self, pkg_def: &Value, auto_yes: bool, verbose: bool) -> Result<()> {
+        self.install_source_from(pkg_def, auto_yes, verbose, "default")
     }
 
     /// Installs a source package, recording `source_repository` in the registry.
@@ -601,6 +690,7 @@ impl PackageInstaller {
         &self,
         pkg_def: &Value,
         auto_yes: bool,
+        verbose: bool,
         source_repository: &str,
     ) -> Result<()> {
         let pkg_id = pkg_def
@@ -609,8 +699,13 @@ impl PackageInstaller {
             .unwrap_or("")
             .to_string();
         let mut provided_binaries: Vec<String> = Vec::new();
-        let result =
-            self.do_install_source(pkg_def, auto_yes, source_repository, &mut provided_binaries);
+        let result = self.do_install_source(
+            pkg_def,
+            auto_yes,
+            verbose,
+            source_repository,
+            &mut provided_binaries,
+        );
         if result.is_err() {
             self.cleanup_failed_install(&pkg_id, &provided_binaries);
         }
@@ -621,6 +716,7 @@ impl PackageInstaller {
         &self,
         pkg_def: &Value,
         auto_yes: bool,
+        verbose: bool,
         source_repository: &str,
         provided_binaries: &mut Vec<String>,
     ) -> Result<()> {
@@ -678,7 +774,7 @@ impl PackageInstaller {
                     src_url.clone(),
                     build_dir.to_string_lossy().to_string(),
                 ];
-                let res = self.executor.run(&cmd, None, &build_env)?;
+                let res = self.executor.run(&cmd, None, &build_env, verbose)?;
                 if res.code != 0 {
                     let cmd2: Vec<String> = vec![
                         "git".to_string(),
@@ -688,7 +784,7 @@ impl PackageInstaller {
                         src_url.clone(),
                         build_dir.to_string_lossy().to_string(),
                     ];
-                    let res2 = self.executor.run(&cmd2, None, &build_env)?;
+                    let res2 = self.executor.run(&cmd2, None, &build_env, verbose)?;
                     if res2.code != 0 {
                         return Err(AsterError::Runtime(format!(
                             "Git clone failed for '{pkg_id}': {}",
@@ -781,9 +877,9 @@ impl PackageInstaller {
             for step in steps {
                 let step_str = py_str(&step);
                 println!("Executing step: {step_str}");
-                let res = self
-                    .executor
-                    .run_shell(&step_str, Some(&build_dir), &build_env)?;
+                let res =
+                    self.executor
+                        .run_shell(&step_str, Some(&build_dir), &build_env, verbose)?;
                 if res.code != 0 {
                     return Err(self.handle_build_failure(
                         &format!("{}\n{}", res.stdout, res.stderr),
@@ -800,6 +896,7 @@ impl PackageInstaller {
                 &staging_dir,
                 &mut build_env,
                 auto_yes,
+                verbose,
             )?;
         } else if build_system == "cmake" {
             println!("Building {pkg_id} (cmake)...");
@@ -813,7 +910,7 @@ impl PackageInstaller {
                 build_dir.to_string_lossy().to_string(),
                 format!("-DCMAKE_INSTALL_PREFIX={}", staging_dir.to_string_lossy()),
             ];
-            let res = self.executor.run(&configure, None, &build_env)?;
+            let res = self.executor.run(&configure, None, &build_env, verbose)?;
             if res.code != 0 {
                 return Err(self.handle_build_failure(
                     &format!("{}\n{}", res.stdout, res.stderr),
@@ -825,7 +922,7 @@ impl PackageInstaller {
                 "--build".to_string(),
                 cmake_build_dir.to_string_lossy().to_string(),
             ];
-            let res = self.executor.run(&build, None, &build_env)?;
+            let res = self.executor.run(&build, None, &build_env, verbose)?;
             if res.code != 0 {
                 return Err(self.handle_build_failure(
                     &format!("{}\n{}", res.stdout, res.stderr),
@@ -837,7 +934,7 @@ impl PackageInstaller {
                 "--install".to_string(),
                 cmake_build_dir.to_string_lossy().to_string(),
             ];
-            let res = self.executor.run(&install, None, &build_env)?;
+            let res = self.executor.run(&install, None, &build_env, verbose)?;
             if res.code != 0 {
                 return Err(self.handle_build_failure(
                     &format!("{}\n{}", res.stdout, res.stderr),
@@ -851,7 +948,7 @@ impl PackageInstaller {
                 "-C".to_string(),
                 build_dir.to_string_lossy().to_string(),
             ];
-            let res = self.executor.run(&make_cmd, None, &build_env)?;
+            let res = self.executor.run(&make_cmd, None, &build_env, verbose)?;
             if res.code != 0 {
                 return Err(self.handle_build_failure(
                     &format!("{}\n{}", res.stdout, res.stderr),
@@ -865,7 +962,7 @@ impl PackageInstaller {
                 format!("DESTDIR={}", staging_dir.to_string_lossy()),
                 "install".to_string(),
             ];
-            let _res = self.executor.run(&install_cmd, None, &build_env)?;
+            let _res = self.executor.run(&install_cmd, None, &build_env, verbose)?;
         }
 
         // Prefer executables that the build system installed into the staging
@@ -922,6 +1019,8 @@ impl PackageInstaller {
             source_repository,
             None,
         )?;
+        self.config
+            .log_history(&format!("Installed '{pkg_id}' version {version}"));
         println!("Successfully compiled and installed '{pkg_id}' version {version}.");
         Ok(())
     }
@@ -936,6 +1035,7 @@ impl PackageInstaller {
         staging_dir: &Path,
         build_env: &mut HashMap<String, String>,
         auto_yes: bool,
+        verbose: bool,
     ) -> Result<()> {
         let custom_cargo_args = build_info.and_then(|b| b.get("cargo_args"));
         if let Some(args) = custom_cargo_args {
@@ -1009,7 +1109,7 @@ impl PackageInstaller {
                     "--profile".to_string(),
                     "minimal".to_string(),
                 ];
-                let res = self.executor.run(&cmd, None, &tc_env)?;
+                let res = self.executor.run(&cmd, None, &tc_env, verbose)?;
                 if res.code != 0 {
                     return Err(AsterError::Runtime(format!(
                         "Failed to bootstrap isolated Rust toolchain: {}",
@@ -1073,7 +1173,9 @@ impl PackageInstaller {
             }
         }
 
-        let res = self.executor.run(&cargo_cmd, Some(build_dir), build_env)?;
+        let res = self
+            .executor
+            .run(&cargo_cmd, Some(build_dir), build_env, verbose)?;
         if res.code != 0 {
             if downloaded_toolchain {
                 let cache_pref = self
@@ -1260,6 +1362,7 @@ impl PackageInstaller {
         }
 
         self.registry.unregister_package(package_id)?;
+        self.config.log_history(&format!("Removed '{package_id}'"));
         println!("Successfully removed '{package_id}'.");
         Ok(())
     }

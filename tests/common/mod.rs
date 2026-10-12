@@ -328,6 +328,7 @@ impl CommandExecutor for FakeExecutor {
         argv: &[String],
         cwd: Option<&Path>,
         env: &HashMap<String, String>,
+        _verbose: bool,
     ) -> std::io::Result<CommandOutput> {
         self.commands.lock().unwrap().push(argv.to_vec());
         self.envs.lock().unwrap().push(env.clone());
@@ -344,6 +345,7 @@ impl CommandExecutor for FakeExecutor {
         script: &str,
         cwd: Option<&Path>,
         _env: &HashMap<String, String>,
+        _verbose: bool,
     ) -> std::io::Result<CommandOutput> {
         let argv = vec!["sh".to_string(), "-c".to_string(), script.to_string()];
         self.commands.lock().unwrap().push(argv.clone());

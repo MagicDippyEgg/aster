@@ -39,6 +39,8 @@ enum Commands {
         package: String,
         #[arg(short = 'y', long = "yes")]
         yes: bool,
+        #[arg(short = 'v', long = "verbose")]
+        verbose: bool,
     },
     /// Remove an installed package
     Remove {
@@ -111,6 +113,17 @@ enum ConfigCommand {
 
 /// Entry point mirroring the original `main(args)` function.
 pub fn run(args: Vec<String>) -> i32 {
+    let args: Vec<String> = args
+        .into_iter()
+        .map(|arg| {
+            if arg == "-verbose" {
+                "--verbose".to_string()
+            } else {
+                arg
+            }
+        })
+        .collect();
+
     let cli = match Cli::try_parse_from(std::iter::once("aster".to_string()).chain(args)) {
         Ok(cli) => cli,
         Err(err) => {
@@ -174,8 +187,12 @@ fn dispatch(
         Commands::Search { query } => search(catalogue, &query),
         Commands::Info { package } => info(registry, catalogue, &package),
         Commands::Installed { package } => installed(registry, &package),
-        Commands::Install { package, yes } => {
-            installer.install(&package, yes)?;
+        Commands::Install {
+            package,
+            yes,
+            verbose,
+        } => {
+            installer.install(&package, yes, verbose)?;
             Ok(0)
         }
         Commands::Remove { package, force } => {
@@ -507,7 +524,11 @@ fn history(config: &AsterConfig) -> crate::error::Result<i32> {
         println!("No history recorded yet.");
     } else {
         let content = fs::read_to_string(history_file)?;
-        println!("{content}");
+        if content.trim().is_empty() {
+            println!("No history recorded yet.");
+        } else {
+            print!("{content}");
+        }
     }
     Ok(0)
 }
@@ -572,7 +593,7 @@ fn upgrade(
         if compare_versions(&inst_ver, &avail_ver) < 0 {
             println!("Upgrading '{target_pkg}' from {inst_ver} to {avail_ver}...");
             installer.remove(target_pkg, false)?;
-            installer.install(target_pkg, false)?;
+            installer.install(target_pkg, false, false)?;
         } else {
             println!("Package '{target_pkg}' is already at latest version ({inst_ver}).");
         }
@@ -591,7 +612,7 @@ fn upgrade(
                 if compare_versions(&inst_ver, &avail_ver) < 0 {
                     println!("Upgrading '{pkg_id}' from {inst_ver} to {avail_ver}...");
                     installer.remove(&pkg_id, false)?;
-                    installer.install(&pkg_id, false)?;
+                    installer.install(&pkg_id, false, false)?;
                     upgraded_any = true;
                 }
             }
