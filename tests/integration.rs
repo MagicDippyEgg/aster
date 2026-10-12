@@ -1651,10 +1651,11 @@ fn test_build_env_ignores_symlinked_package_directories() {
     std::os::unix::fs::symlink(&external_prefix, &package_link).unwrap();
 
     let env = aster::config::get_build_env(&f.config, None);
+    let package_link_text = package_link.to_string_lossy();
     for variable in ["PATH", "CPATH", "LD_LIBRARY_PATH", "CMAKE_PREFIX_PATH"] {
         if let Some(paths) = env.get(variable) {
             assert!(
-                !paths.split(':').any(|path| path == package_link),
+                !paths.split(':').any(|path| path == package_link_text),
                 "{variable} should not include symlinked package directory {}",
                 package_link.display()
             );
