@@ -186,27 +186,59 @@ impl RegistryManager {
         };
 
         if package_dir_is_real {
-            if let Some(files) = info.get("installed_files").and_then(|v| v.as_array()) {
-                for f in files {
-                    if let Some(rel) = f.as_str() {
-                        if !is_safe_recorded_file_path(rel) {
-                            issues.push(format!("Unsafe recorded file path: {rel}"));
-                            continue;
-                        }
-                        let fpath = pkg_dir.join(rel);
-                        if !crate::util::exists_or_symlink(&fpath) {
-                            issues.push(format!("Missing recorded file: {rel}"));
-                        } else if fpath.is_symlink() && !fpath.exists() {
-                            issues.push(format!("Broken recorded symlink: {rel}"));
+            match info.get("installed_files").and_then(|v| v.as_array()) {
+                Some(files) => {
+                    for f in files {
+                        match f.as_str() {
+                            Some(rel) if !is_safe_recorded_file_path(rel) => {
+                                issues.push(format!("Unsafe recorded file path: {rel}"));
+                            }
+                            Some(rel) => {
+                                let fpath = pkg_dir.join(rel);
+                                if !crate::util::exists_or_symlink(&fpath) {
+                                    issues.push(format!("Missing recorded file: {rel}"));
+                                } else if fpath.is_symlink() && !fpath.exists() {
+                                    issues.push(format!("Broken recorded symlink: {rel}"));
+                                }
+                            }
+                            None => issues.push(
+                                "Invalid recorded file entry: expected a relative path string"
+                                    .to_string(),
+                            ),
                         }
                     }
                 }
+                None => issues.push("Missing or invalid installed file metadata".to_string()),
             }
         }
 
-        if let Some(bins) = info.get("provided_binaries").and_then(|v| v.as_array()) {
-            for b in bins {
-                if let Some(bin_name) = b.as_str() {
+        match info.get("provided_binaries").and_then(|v| v.as_array()) {
+            Some(bins) => {
+                for b in bins {
+                    let bin_name = match b.as_str() {
+                        Some(name)
+                            if !name.is_empty()
+                                && name != "."
+                                && name != ".."
+                                && !name.contains('/')
+                                && !name.contains('\\')
+                                && !name.contains('\0') =>
+                        {
+                            name
+                        }
+                        Some(name) => {
+                            issues.push(format!("Unsafe recorded command name: {name}"));
+                            continue;
+                        }
+                        None => {
+                            issues.push(
+                                "Invalid recorded command entry: expected a command name string"
+                                    .to_string(),
+                            );
+                            continue;
+                        }
+                    };
+
                     let link_path = self.config.bin_dir.join(bin_name);
                     if !crate::util::exists_or_symlink(&link_path) {
                         issues.push(format!("Missing command symlink: bin/{bin_name}"));
@@ -241,6 +273,7 @@ impl RegistryManager {
                     }
                 }
             }
+            None => issues.push("Missing or invalid provided command metadata".to_string()),
         }
 
         Ok(issues)

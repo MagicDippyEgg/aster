@@ -1539,13 +1539,13 @@ fn test_upgrade_retry_with_existing_backup_errors() {
     assert!(backup_dir.join("preserved_file").exists());
 }
 
-
 #[test]
 fn test_make_install_failure_is_reported_and_not_registered() {
     let f = Fixture::new();
 
     let archive = f.temp.path().join("failing-make-install.tar.gz");
-    let makefile = b"all:\n\t@echo build complete\ninstall:\n\t@echo deliberate failure >&2\n\t@false\n";
+    let makefile =
+        b"all:\n\t@echo build complete\ninstall:\n\t@echo deliberate failure >&2\n\t@false\n";
     make_tar_gz(&archive, &[("Makefile", makefile, 0o644)]);
 
     let pkg_def = json!({
@@ -1584,7 +1584,9 @@ fn test_verify_rejects_package_directory_symlink() {
 
     let issues = f.registry().verify_package("fastfetch-bin").unwrap();
     assert!(
-        issues.iter().any(|issue| issue.contains("not a real directory")),
+        issues
+            .iter()
+            .any(|issue| issue.contains("not a real directory")),
         "verification should flag a package directory replaced by a symlink; got: {issues:?}"
     );
 }
