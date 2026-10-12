@@ -364,7 +364,9 @@ impl PackageInstaller {
                             Err(_) => {
                                 if let Ok(raw_target) = std::fs::read_link(&link_path) {
                                     let raw_path = if raw_target.is_relative() {
-                                        normalize_path_lexically(&self.config.bin_dir.join(&raw_target))
+                                        normalize_path_lexically(
+                                            &self.config.bin_dir.join(&raw_target),
+                                        )
                                     } else {
                                         normalize_path_lexically(&raw_target)
                                     };

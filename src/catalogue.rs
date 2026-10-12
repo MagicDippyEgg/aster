@@ -266,10 +266,7 @@ impl CatalogueManager {
 
 fn validate_definition_for_id(data: &Value, expected_id: &str) -> Result<()> {
     validate_package_definition(data)?;
-    let actual_id = data
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
+    let actual_id = data.get("id").and_then(|v| v.as_str()).unwrap_or_default();
     if actual_id != expected_id {
         return Err(AsterError::Validation(format!(
             "Package ID mismatch: catalogue index requested '{expected_id}', but its definition declares '{actual_id}'."
@@ -314,7 +311,10 @@ mod tests {
             "packages/%2e%2e/outside.json",
             "C:/outside.json",
         ] {
-            assert!(validate_definition_path(path).is_err(), "should reject {path:?}");
+            assert!(
+                validate_definition_path(path).is_err(),
+                "should reject {path:?}"
+            );
         }
         assert!(validate_definition_path("packages/fastfetch-bin.json").is_ok());
         assert!(validate_definition_path("vendor/pkg/definition.json").is_ok());

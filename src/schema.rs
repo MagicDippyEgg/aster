@@ -87,7 +87,15 @@ mod tests {
 
     #[test]
     fn package_ids_reject_path_traversal_and_nul() {
-        for id in ["", ".", "..", "../escape", "pkg/escape", "pkg\\escape", "nul\0id"] {
+        for id in [
+            "",
+            ".",
+            "..",
+            "../escape",
+            "pkg/escape",
+            "pkg\\escape",
+            "nul\0id",
+        ] {
             assert!(validate_package_id(id).is_err(), "should reject {id:?}");
         }
     }

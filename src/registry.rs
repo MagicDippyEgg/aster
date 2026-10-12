@@ -193,7 +193,9 @@ impl RegistryManager {
                             Err(_) => {
                                 if let Ok(raw_target) = std::fs::read_link(&link_path) {
                                     let raw_path = if raw_target.is_relative() {
-                                        crate::util::normalize_path_lexically(&self.config.bin_dir.join(&raw_target))
+                                        crate::util::normalize_path_lexically(
+                                            &self.config.bin_dir.join(&raw_target),
+                                        )
                                     } else {
                                         crate::util::normalize_path_lexically(&raw_target)
                                     };

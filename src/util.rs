@@ -225,7 +225,6 @@ pub fn which(name: &str, path: Option<&str>) -> Option<PathBuf> {
     None
 }
 
-
 #[cfg(test)]
 mod path_normalization_tests {
     use super::normalize_path_lexically;

@@ -1444,7 +1444,11 @@ fn test_upgrade_missing_package_directory_refuses_without_mutation() {
     assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
     assert_eq!(code(&f.run_cli(&["install", "fastfetch-bin"])), 0);
 
-    let info_before = f.registry().get_installed_package("fastfetch-bin").unwrap().unwrap();
+    let info_before = f
+        .registry()
+        .get_installed_package("fastfetch-bin")
+        .unwrap()
+        .unwrap();
     let pkg_dir = f.config.packages_dir.join("fastfetch-bin");
     fs::remove_dir_all(&pkg_dir).unwrap();
 
@@ -1454,9 +1458,17 @@ fn test_upgrade_missing_package_directory_refuses_without_mutation() {
         .unwrap_err();
     assert!(err.to_string().contains("Cannot safely upgrade"));
     assert!(f.registry().is_installed("fastfetch-bin").unwrap());
-    let info_after = f.registry().get_installed_package("fastfetch-bin").unwrap().unwrap();
+    let info_after = f
+        .registry()
+        .get_installed_package("fastfetch-bin")
+        .unwrap()
+        .unwrap();
     assert_eq!(info_after["version"], info_before["version"]);
-    assert!(!f.config.packages_dir.join("fastfetch-bin.upgrade_backup").exists());
+    assert!(!f
+        .config
+        .packages_dir
+        .join("fastfetch-bin.upgrade_backup")
+        .exists());
 }
 
 #[test]
