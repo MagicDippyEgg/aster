@@ -294,6 +294,22 @@ fn validate_definition_path(path: &str) -> Result<()> {
     Ok(())
 }
 
+fn priority_of(info: &Value) -> f64 {
+    match info.get("priority") {
+        Some(Value::Number(n)) => n.as_f64().unwrap_or(100.0),
+        Some(Value::String(s)) => s.parse::<i64>().map(|i| i as f64).unwrap_or(100.0),
+        _ => 100.0,
+    }
+}
+
+/// Renders a priority value the way Python would for display.
+pub fn display_priority(info: &Value) -> String {
+    match info.get("priority") {
+        Some(v) => py_str(v),
+        None => "100".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,21 +347,5 @@ mod tests {
         });
         assert!(validate_definition_for_id(&data, "requested-package").is_err());
         assert!(validate_definition_for_id(&data, "other-package").is_ok());
-    }
-}
-
-fn priority_of(info: &Value) -> f64 {
-    match info.get("priority") {
-        Some(Value::Number(n)) => n.as_f64().unwrap_or(100.0),
-        Some(Value::String(s)) => s.parse::<i64>().map(|i| i as f64).unwrap_or(100.0),
-        _ => 100.0,
-    }
-}
-
-/// Renders a priority value the way Python would for display.
-pub fn display_priority(info: &Value) -> String {
-    match info.get("priority") {
-        Some(v) => py_str(v),
-        None => "100".to_string(),
     }
 }
