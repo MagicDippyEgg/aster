@@ -742,16 +742,26 @@ impl PackageInstaller {
         self.install_binary_from(pkg_def, "default")
     }
 
-    /// Refuses to overwrite installed records or orphaned package directories.
+    /// Refuses to overwrite unregistered package directories or follow a
+    /// registered package path that is not a real directory.
     fn ensure_install_target_available(&self, package_id: &str) -> Result<()> {
         validate_package_id(package_id)?;
+        let package_dir = self.config.packages_dir.join(package_id);
+
         if self.registry.is_installed(package_id)? {
-            return Err(AsterError::Runtime(format!(
-                "Package '{package_id}' is already installed; use 'upgrade' to replace it."
-            )));
+            return match std::fs::symlink_metadata(&package_dir) {
+                Ok(metadata) if metadata.file_type().is_dir() => Ok(()),
+                Ok(_) => Err(AsterError::Runtime(format!(
+                    "Refusing to reinstall '{package_id}': registered package path '{}' is not a real directory.",
+                    package_dir.display()
+                ))),
+                Err(e) => Err(AsterError::Runtime(format!(
+                    "Refusing to reinstall '{package_id}': registered package directory '{}' cannot be accessed: {e}",
+                    package_dir.display()
+                ))),
+            };
         }
 
-        let package_dir = self.config.packages_dir.join(package_id);
         if exists_or_symlink(&package_dir) {
             return Err(AsterError::Runtime(format!(
                 "Refusing to overwrite existing package path '{}'; inspect or remove it before installing '{package_id}'.",
