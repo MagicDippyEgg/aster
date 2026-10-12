@@ -643,7 +643,10 @@ impl PackageInstaller {
         };
         let package_dir = normalize_path_lexically(&self.config.packages_dir.join(package_id));
         let backup_dir = normalize_path_lexically(
-            &self.config.packages_dir.join(format!("{package_id}.upgrade_backup")),
+            &self
+                .config
+                .packages_dir
+                .join(format!("{package_id}.upgrade_backup")),
         );
         target.starts_with(&package_dir) || target.starts_with(&backup_dir)
     }
@@ -1983,7 +1986,6 @@ fn value_to_string_list(v: &Value) -> Vec<String> {
         _ => Vec::new(),
     }
 }
-
 
 #[cfg(test)]
 mod download_filename_tests {
