@@ -1,7 +1,7 @@
 //! Installer for binary and source packages.
 
 use crate::catalogue::CatalogueManager;
-use crate::config::{fetch_url_to_file, get_build_env, AsterConfig};
+use crate::config::{get_build_env, AsterConfig};
 use crate::error::{AsterError, Result};
 use crate::registry::RegistryManager;
 use crate::resolver::DependencyResolver;
@@ -202,6 +202,139 @@ impl PackageInstaller {
             registry,
             catalogue,
             executor,
+        }
+    }
+
+    /// Performs a dry run of installing a package, displaying the installation plan.
+    pub fn dry_run(&self, package_id: &str) -> Result<()> {
+        let resolver = DependencyResolver::new(self.catalogue.clone(), self.registry.clone());
+        let install_plan = resolver
+            .resolve_dependencies(package_id)
+            .map_err(|e| match e {
+                AsterError::Dependency(m) => {
+                    AsterError::Runtime(format!("Dependency resolution failed: {m}"))
+                }
+                other => other,
+            })?;
+
+        println!("Dry run: Installation plan for '{package_id}':\n");
+        println!(
+            "{:<4} {:<20} {:<15} {:<15} {:<10} STATUS",
+            "#", "PACKAGE ID", "VERSION", "REPOSITORY", "TYPE"
+        );
+        println!("{}", "-".repeat(75));
+
+        for (idx, pkg) in install_plan.iter().enumerate() {
+            let is_inst = self.registry.is_installed(pkg)?;
+            let (pkg_def, source_repo) = self
+                .catalogue
+                .get_package_definition_with_source(pkg, None)?
+                .ok_or_else(|| {
+                    AsterError::Runtime(format!(
+                        "Package definition for '{pkg}' not found in catalogue."
+                    ))
+                })?;
+
+            let version = pkg_def
+                .get("version")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let pkg_type = pkg_def
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let status = if is_inst {
+                "Already installed"
+            } else {
+                "To install"
+            };
+
+            println!(
+                "{:<4} {:<20} {:<15} {:<15} {:<10} {status}",
+                idx + 1,
+                pkg,
+                version,
+                source_repo,
+                pkg_type
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Upgrades an installed package safely, preserving the previous version and rolling back on failure.
+    pub fn upgrade_package(&self, package_id: &str, auto_yes: bool, verbose: bool) -> Result<()> {
+        if !self.registry.is_installed(package_id)? {
+            return Err(AsterError::Runtime(format!(
+                "Package '{package_id}' is not installed."
+            )));
+        }
+
+        let old_info = self
+            .registry
+            .get_installed_package(package_id)?
+            .ok_or_else(|| AsterError::Runtime(format!("Package '{package_id}' is not installed.")))?;
+
+        let pkg_dir = self.config.packages_dir.join(package_id);
+        let backup_dir = self.config.packages_dir.join(format!("{package_id}.upgrade_backup"));
+
+        if backup_dir.exists() {
+            let _ = std::fs::remove_dir_all(&backup_dir);
+        }
+
+        if pkg_dir.exists() {
+            std::fs::rename(&pkg_dir, &backup_dir)?;
+        }
+
+        let _ = self.registry.unregister_package(package_id);
+
+        let res = self.install(package_id, auto_yes, verbose);
+
+        match res {
+            Ok(()) => {
+                if backup_dir.exists() {
+                    let _ = std::fs::remove_dir_all(&backup_dir);
+                }
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!("Upgrade failed for '{package_id}'. Rolling back to previous version...");
+
+                let old_binaries: Vec<String> = old_info
+                    .get("provided_binaries")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|b| b.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                self.cleanup_failed_install(package_id, &old_binaries);
+
+                if backup_dir.exists() {
+                    let _ = std::fs::rename(&backup_dir, &pkg_dir);
+                }
+
+                if pkg_dir.exists() {
+                    let _ = self.create_symlinks(&pkg_dir, &old_binaries);
+                }
+
+                if let Ok(mut reg) = self.registry.load_registry() {
+                    if let Some(Value::Object(map)) = reg.get_mut("installed") {
+                        map.insert(package_id.to_string(), old_info);
+                        let _ = self.registry.save_registry(&reg);
+                    }
+                }
+
+                if backup_dir.exists() {
+                    let _ = std::fs::remove_dir_all(&backup_dir);
+                }
+
+                Err(AsterError::Runtime(format!(
+                    "Upgrade failed for '{package_id}': {e}. Rolled back to previous version."
+                )))
+            }
         }
     }
 
@@ -503,8 +636,6 @@ impl PackageInstaller {
             .map(|s| s.to_string());
 
         let msg_prefix = format!("Downloading binary release for {pkg_id} ({platform_key})...");
-        let is_tty = std::io::stdout().is_terminal();
-
         let download_filename = url
             .rsplit('/')
             .next()
@@ -513,55 +644,7 @@ impl PackageInstaller {
             .unwrap_or_else(|| format!("{pkg_id}.archive"));
         let dest_archive = self.config.downloads_cache.join(&download_filename);
 
-        if url.starts_with("http://") || url.starts_with("https://") {
-            let last_pct = std::cell::Cell::new(101u64);
-            let res = crate::config::fetch_url_to_file_with_progress(
-                &url,
-                &dest_archive,
-                None,
-                30,
-                |downloaded, total| {
-                    let pct = (downloaded * 100) / total;
-                    if pct != last_pct.get() {
-                        last_pct.set(pct);
-                        if is_tty {
-                            print!("\r{msg_prefix} {pct}%");
-                            let _ = std::io::stdout().flush();
-                        }
-                    }
-                },
-            );
-
-            if is_tty {
-                println!("\r{msg_prefix}        ");
-                let _ = std::io::stdout().flush();
-            } else {
-                println!("{msg_prefix}");
-            }
-
-            if let Err(e) = res {
-                if dest_archive.exists() {
-                    let _ = std::fs::remove_file(&dest_archive);
-                }
-                return Err(AsterError::Runtime(format!(
-                    "Failed to download asset from {url}: {e}"
-                )));
-            }
-        } else {
-            println!("{msg_prefix}");
-            let src_path = if let Some(rest) = url.strip_prefix("file://") {
-                PathBuf::from(rest)
-            } else {
-                PathBuf::from(&url)
-            };
-            if !src_path.exists() {
-                return Err(AsterError::NotFound(format!(
-                    "Local binary asset not found: {}",
-                    src_path.display()
-                )));
-            }
-            std::fs::copy(&src_path, &dest_archive)?;
-        }
+        download_with_progress(&url, &dest_archive, &msg_prefix, 30)?;
 
         if let Some(expected) = &expected_sha256 {
             if expected != "EXPECTED_SHA256" {
@@ -807,16 +890,8 @@ impl PackageInstaller {
                 };
                 let dest_archive = self.config.downloads_cache.join(format!("{pkg_id}{ext}"));
 
-                if src_url.starts_with("http://") || src_url.starts_with("https://") {
-                    fetch_url_to_file(&src_url, &dest_archive, None, 30)?;
-                } else {
-                    let src_path = if let Some(rest) = src_url.strip_prefix("file://") {
-                        PathBuf::from(rest)
-                    } else {
-                        PathBuf::from(&src_url)
-                    };
-                    std::fs::copy(&src_path, &dest_archive)?;
-                }
+                let msg_prefix = format!("Downloading source archive for {pkg_id}...");
+                download_with_progress(&src_url, &dest_archive, &msg_prefix, 30)?;
 
                 let ds = dest_archive.to_string_lossy().to_string();
                 if ds.ends_with(".zip") || src_type == "zip" {
@@ -1089,7 +1164,8 @@ impl PackageInstaller {
             );
 
             let boot_result: Result<()> = (|| {
-                fetch_url_to_file(&rustup_url, &rustup_init_path, None, 60)?;
+                let msg_prefix = "Downloading isolated Rust toolchain...".to_string();
+                download_with_progress(&rustup_url, &rustup_init_path, &msg_prefix, 60)?;
                 set_mode(&rustup_init_path, 0o755)?;
 
                 let mut tc_env = build_env.clone();
@@ -1364,6 +1440,68 @@ impl PackageInstaller {
         self.registry.unregister_package(package_id)?;
         self.config.log_history(&format!("Removed '{package_id}'"));
         println!("Successfully removed '{package_id}'.");
+        Ok(())
+    }
+}
+
+fn download_with_progress(
+    url: &str,
+    dest_path: &Path,
+    msg_prefix: &str,
+    timeout: u64,
+) -> Result<()> {
+    let is_tty = std::io::stdout().is_terminal();
+    if url.starts_with("http://") || url.starts_with("https://") {
+        let last_pct = std::cell::Cell::new(101u64);
+        let res = crate::config::fetch_url_to_file_with_progress(
+            url,
+            dest_path,
+            None,
+            timeout,
+            |downloaded, total| {
+                if total > 0 {
+                    let pct = (downloaded * 100) / total;
+                    if pct != last_pct.get() {
+                        last_pct.set(pct);
+                        if is_tty {
+                            print!("\r{msg_prefix} {pct}%");
+                            let _ = std::io::stdout().flush();
+                        }
+                    }
+                }
+            },
+        );
+
+        if is_tty {
+            println!("\r{msg_prefix}        ");
+            let _ = std::io::stdout().flush();
+        } else {
+            println!("{msg_prefix}");
+        }
+
+        res.map_err(|e| {
+            if dest_path.exists() {
+                let _ = std::fs::remove_file(dest_path);
+            }
+            AsterError::Runtime(format!("Failed to download asset from {url}: {e}"))
+        })
+    } else {
+        println!("{msg_prefix}");
+        let src_path = if let Some(rest) = url.strip_prefix("file://") {
+            PathBuf::from(rest)
+        } else {
+            PathBuf::from(url)
+        };
+        if !src_path.exists() {
+            return Err(AsterError::NotFound(format!(
+                "Local asset not found: {}",
+                src_path.display()
+            )));
+        }
+        if let Some(parent) = dest_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(&src_path, dest_path)?;
         Ok(())
     }
 }

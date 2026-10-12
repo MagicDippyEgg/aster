@@ -1082,3 +1082,161 @@ fn test_install_verbose_flags() {
     let stdout_verb = stdout(&out_verbose);
     assert!(stdout_verb.contains("$ mkdir -p staging_bin"));
 }
+
+#[test]
+fn test_history_limit_and_local_timestamp() {
+    let f = Fixture::new();
+
+    f.config.log_history("Entry 1");
+    f.config.log_history("Entry 2");
+    f.config.log_history("Entry 3");
+
+    let out_all = f.run_cli(&["history"]);
+    assert_eq!(code(&out_all), 0);
+    let text_all = stdout(&out_all);
+    assert!(text_all.contains("Entry 1"));
+    assert!(text_all.contains("Entry 2"));
+    assert!(text_all.contains("Entry 3"));
+
+    let out_limit = f.run_cli(&["history", "--limit", "2"]);
+    assert_eq!(code(&out_limit), 0);
+    let text_limit = stdout(&out_limit);
+    assert!(!text_limit.contains("Entry 1"));
+    assert!(text_limit.contains("Entry 2"));
+    assert!(text_limit.contains("Entry 3"));
+
+    let re = regex::Regex::new(r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] Entry 3").unwrap();
+    assert!(re.is_match(&text_limit));
+}
+
+#[test]
+fn test_install_dry_run() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+
+    let out = f.run_cli(&["install", "--dry-run", "app-with-dep"]);
+    assert_eq!(code(&out), 0);
+    let stdout_text = stdout(&out);
+    assert!(stdout_text.contains("Dry run: Installation plan for 'app-with-dep':"));
+    assert!(stdout_text.contains("dep-lib"));
+    assert!(stdout_text.contains("app-with-dep"));
+
+    // Ensure package was NOT installed
+    assert_eq!(code(&f.run_cli(&["installed", "app-with-dep"])), 1);
+}
+
+#[test]
+fn test_verify_intact_and_broken() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+
+    assert_eq!(code(&f.run_cli(&["verify"])), 0);
+
+    assert_eq!(code(&f.run_cli(&["install", "fastfetch-bin"])), 0);
+
+    // Verify all intact
+    let out_verify = f.run_cli(&["verify"]);
+    assert_eq!(code(&out_verify), 0);
+    assert!(stdout(&out_verify).contains("All installed packages are intact."));
+
+    let out_single = f.run_cli(&["verify", "fastfetch-bin"]);
+    assert_eq!(code(&out_single), 0);
+    assert!(stdout(&out_single).contains("Package 'fastfetch-bin' is intact."));
+
+    // Break symlink
+    let link_path = f.config.bin_dir.join("fastfetch");
+    fs::remove_file(&link_path).unwrap();
+
+    let out_broken = f.run_cli(&["verify", "fastfetch-bin"]);
+    assert_ne!(code(&out_broken), 0);
+    assert!(stdout(&out_broken).contains("Missing command symlink"));
+}
+
+#[test]
+fn test_safe_upgrade_and_rollback() {
+    let f = Fixture::new();
+
+    // Create repo with v1 of pkg
+    let repo_dir = f.temp.path().join("upg_repo");
+    fs::create_dir_all(repo_dir.join("packages")).unwrap();
+
+    let v1_archive = f.temp.path().join("pkg-1.0.0.tar.gz");
+    make_tar_gz(&v1_archive, &[("bin/mypkg", b"#!/bin/sh\necho v1", 0o755)]);
+
+    write_json(
+        &repo_dir.join("index.json"),
+        &json!({
+            "schema_version": 1,
+            "packages": {
+                "mypkg": {"definition": "packages/mypkg.json", "type": "binary", "description": "My Pkg"}
+            }
+        }),
+    );
+    write_json(
+        &repo_dir.join("packages/mypkg.json"),
+        &json!({
+            "schema_version": 1,
+            "id": "mypkg",
+            "name": "mypkg",
+            "version": "1.0.0",
+            "type": "binary",
+            "downloads": {
+                "linux-x86_64": {"url": format!("file://{}", v1_archive.display())},
+                "linux-aarch64": {"url": format!("file://{}", v1_archive.display())}
+            }
+        }),
+    );
+
+    let repos = json!({
+        "schema_version": 1,
+        "repositories": {
+            "default": {"name": "default", "url": repo_dir.to_string_lossy(), "priority": 100}
+        }
+    });
+    f.config
+        .save_json_atomic(&f.config.repositories_json, &repos)
+        .unwrap();
+
+    f.catalogue().update_all().unwrap();
+    f.installer().install("mypkg", true, false).unwrap();
+
+    let bin_link = f.config.bin_dir.join("mypkg");
+    assert!(bin_link.exists());
+
+    // Update repo to v2 with a NON-EXISTENT archive so installation fails
+    write_json(
+        &repo_dir.join("index.json"),
+        &json!({
+            "schema_version": 1,
+            "packages": {
+                "mypkg": {"definition": "packages/mypkg.json", "type": "binary", "description": "My Pkg v2"}
+            }
+        }),
+    );
+    write_json(
+        &repo_dir.join("packages/mypkg.json"),
+        &json!({
+            "schema_version": 1,
+            "id": "mypkg",
+            "name": "mypkg",
+            "version": "2.0.0",
+            "type": "binary",
+            "downloads": {
+                "linux-x86_64": {"url": "file:///nonexistent/path/pkg-2.0.0.tar.gz"},
+                "linux-aarch64": {"url": "file:///nonexistent/path/pkg-2.0.0.tar.gz"}
+            }
+        }),
+    );
+    f.catalogue().update_all().unwrap();
+
+    let err = f.installer().upgrade_package("mypkg", true, false).unwrap_err();
+    assert!(err.to_string().contains("Upgrade failed"));
+
+    // Verify rollback restored v1.0.0
+    assert!(f.registry().is_installed("mypkg").unwrap());
+    let info = f.registry().get_installed_package("mypkg").unwrap().unwrap();
+    assert_eq!(info["version"], "1.0.0");
+    assert!(bin_link.exists());
+    assert!(f.config.packages_dir.join("mypkg").exists());
+    assert!(!f.config.packages_dir.join("mypkg.upgrade_backup").exists());
+}

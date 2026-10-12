@@ -41,6 +41,8 @@ enum Commands {
         yes: bool,
         #[arg(short = 'v', long = "verbose")]
         verbose: bool,
+        #[arg(long = "dry-run")]
+        dry_run: bool,
     },
     /// Remove an installed package
     Remove {
@@ -52,8 +54,16 @@ enum Commands {
     Clean,
     /// Diagnose installation, path, and tool issues
     Doctor,
+    /// Verify intactness of installed packages
+    Verify {
+        #[arg(default_value = "")]
+        package: String,
+    },
     /// Show history log of package operations
-    History,
+    History {
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     /// Refresh package indexes and show available updates
     Update,
     /// Upgrade installed packages
@@ -191,8 +201,13 @@ fn dispatch(
             package,
             yes,
             verbose,
+            dry_run,
         } => {
-            installer.install(&package, yes, verbose)?;
+            if dry_run {
+                installer.dry_run(&package)?;
+            } else {
+                installer.install(&package, yes, verbose)?;
+            }
             Ok(0)
         }
         Commands::Remove { package, force } => {
@@ -201,7 +216,8 @@ fn dispatch(
         }
         Commands::Clean => clean(config),
         Commands::Doctor => doctor(config),
-        Commands::History => history(config),
+        Commands::Verify { package } => verify(registry, &package),
+        Commands::History { limit } => history(config, limit),
         Commands::Update => update(registry, catalogue),
         Commands::Upgrade { package } => upgrade(registry, catalogue, installer, &package),
         Commands::Repo { command } => repo(config, catalogue, command),
@@ -257,6 +273,7 @@ fn completions(shell: clap_complete::Shell) -> crate::error::Result<i32> {
              complete -c aster -n \"__fish_aster_using_subcommand info\" -f -a \"(aster _complete available 2>/dev/null)\"\n\
              complete -c aster -n \"__fish_aster_using_subcommand installed\" -f -a \"(aster _complete available 2>/dev/null)\"\n\
              complete -c aster -n \"__fish_aster_using_subcommand remove\" -f -a \"(aster _complete installed 2>/dev/null)\"\n\
+             complete -c aster -n \"__fish_aster_using_subcommand verify\" -f -a \"(aster _complete installed 2>/dev/null)\"\n\
              complete -c aster -n \"__fish_aster_using_subcommand upgrade\" -f -a \"(aster _complete installed 2>/dev/null)\"\n\
              complete -c aster -n \"__fish_aster_using_subcommand repo; and __fish_seen_subcommand_from remove\" -f -a \"(aster _complete repos 2>/dev/null)\"\n\
              complete -c aster -n \"__fish_aster_using_subcommand repo; and __fish_seen_subcommand_from set-priority\" -f -a \"(aster _complete repos 2>/dev/null)\""
@@ -518,16 +535,73 @@ fn doctor(config: &AsterConfig) -> crate::error::Result<i32> {
     Ok(0)
 }
 
-fn history(config: &AsterConfig) -> crate::error::Result<i32> {
+fn verify(registry: &RegistryManager, target_pkg: &str) -> crate::error::Result<i32> {
+    if !target_pkg.is_empty() {
+        match registry.verify_package(target_pkg) {
+            Ok(issues) => {
+                if issues.is_empty() {
+                    println!("Package '{target_pkg}' is intact.");
+                    Ok(0)
+                } else {
+                    println!("Package '{target_pkg}' verification failed:");
+                    for issue in issues {
+                        println!("  - {issue}");
+                    }
+                    Ok(1)
+                }
+            }
+            Err(e) => {
+                println!("{e}");
+                Ok(1)
+            }
+        }
+    } else {
+        let installed = registry.list_installed()?;
+        if installed.is_empty() {
+            println!("No packages currently installed.");
+            return Ok(0);
+        }
+
+        let mut failed_count = 0;
+        for pkg_id in installed.keys() {
+            if let Ok(issues) = registry.verify_package(pkg_id) {
+                if !issues.is_empty() {
+                    failed_count += 1;
+                    println!("Package '{pkg_id}' verification failed:");
+                    for issue in issues {
+                        println!("  - {issue}");
+                    }
+                }
+            }
+        }
+
+        if failed_count == 0 {
+            println!("All installed packages are intact.");
+            Ok(0)
+        } else {
+            println!("\nVerification completed with issues in {failed_count} package(s).");
+            Ok(1)
+        }
+    }
+}
+
+fn history(config: &AsterConfig, limit: Option<usize>) -> crate::error::Result<i32> {
     let history_file = config.logs_dir.join("history.log");
     if !history_file.exists() {
         println!("No history recorded yet.");
     } else {
         let content = fs::read_to_string(history_file)?;
-        if content.trim().is_empty() {
+        let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+        if lines.is_empty() {
             println!("No history recorded yet.");
         } else {
-            print!("{content}");
+            let display_lines = match limit {
+                Some(n) if n < lines.len() => &lines[lines.len() - n..],
+                _ => &lines[..],
+            };
+            for line in display_lines {
+                println!("{line}");
+            }
         }
     }
     Ok(0)
@@ -592,8 +666,7 @@ fn upgrade(
         let avail_ver = pkg_def.get("version").map(py_str).unwrap_or_default();
         if compare_versions(&inst_ver, &avail_ver) < 0 {
             println!("Upgrading '{target_pkg}' from {inst_ver} to {avail_ver}...");
-            installer.remove(target_pkg, false)?;
-            installer.install(target_pkg, false, false)?;
+            installer.upgrade_package(target_pkg, false, false)?;
         } else {
             println!("Package '{target_pkg}' is already at latest version ({inst_ver}).");
         }
@@ -611,8 +684,7 @@ fn upgrade(
                 let avail_ver = pkg_def.get("version").map(py_str).unwrap_or_default();
                 if compare_versions(&inst_ver, &avail_ver) < 0 {
                     println!("Upgrading '{pkg_id}' from {inst_ver} to {avail_ver}...");
-                    installer.remove(&pkg_id, false)?;
-                    installer.install(&pkg_id, false, false)?;
+                    installer.upgrade_package(&pkg_id, false, false)?;
                     upgraded_any = true;
                 }
             }

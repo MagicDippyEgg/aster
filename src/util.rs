@@ -127,8 +127,28 @@ pub fn find_file(root: &Path, name: &str) -> Option<PathBuf> {
     walk(root, name)
 }
 
-/// Returns current UTC timestamp in "YYYY-MM-DD HH:MM:SS" format.
+/// Returns current system local timestamp in "YYYY-MM-DD HH:MM:SS" format.
 pub fn current_timestamp() -> String {
+    #[cfg(unix)]
+    {
+        unsafe {
+            let now = libc::time(std::ptr::null_mut());
+            let mut tm = std::mem::MaybeUninit::<libc::tm>::uninit();
+            if !libc::localtime_r(&now, tm.as_mut_ptr()).is_null() {
+                let tm = tm.assume_init();
+                return format!(
+                    "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                    tm.tm_year + 1900,
+                    tm.tm_mon + 1,
+                    tm.tm_mday,
+                    tm.tm_hour,
+                    tm.tm_min,
+                    tm.tm_sec
+                );
+            }
+        }
+    }
+
     let now = std::time::SystemTime::now();
     let dur = now
         .duration_since(std::time::UNIX_EPOCH)

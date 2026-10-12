@@ -147,6 +147,60 @@ impl RegistryManager {
         self.save_registry(&registry)
     }
 
+    /// Verifies intactness of an installed package, returning a list of issues found.
+    pub fn verify_package(&self, package_id: &str) -> Result<Vec<String>> {
+        let info = match self.get_installed_package(package_id)? {
+            Some(i) => i,
+            None => {
+                return Err(crate::error::AsterError::Runtime(format!(
+                    "Package '{package_id}' is not installed."
+                )))
+            }
+        };
+
+        let mut issues = Vec::new();
+        let pkg_dir = self.config.packages_dir.join(package_id);
+        let pkg_resolved = std::fs::canonicalize(&pkg_dir).unwrap_or_else(|_| pkg_dir.clone());
+
+        if !pkg_dir.exists() || !pkg_dir.is_dir() {
+            issues.push(format!("Missing package directory: {}", pkg_dir.display()));
+        } else if let Some(files) = info.get("installed_files").and_then(|v| v.as_array()) {
+            for f in files {
+                if let Some(rel) = f.as_str() {
+                    let fpath = pkg_dir.join(rel);
+                    if !crate::util::exists_or_symlink(&fpath) {
+                        issues.push(format!("Missing recorded file: {rel}"));
+                    }
+                }
+            }
+        }
+
+        if let Some(bins) = info.get("provided_binaries").and_then(|v| v.as_array()) {
+            for b in bins {
+                if let Some(bin_name) = b.as_str() {
+                    let link_path = self.config.bin_dir.join(bin_name);
+                    if !crate::util::exists_or_symlink(&link_path) {
+                        issues.push(format!("Missing command symlink: bin/{bin_name}"));
+                    } else if !link_path.exists() {
+                        issues.push(format!("Broken command symlink: bin/{bin_name}"));
+                    } else {
+                        let link_target = std::fs::canonicalize(&link_path).ok();
+                        let belongs = link_target.map_or(false, |t| {
+                            t.starts_with(&pkg_resolved) || t.starts_with(&pkg_dir)
+                        });
+                        if !belongs {
+                            issues.push(format!(
+                                "Command symlink bin/{bin_name} no longer points to package '{package_id}'"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(issues)
+    }
+
     /// Removes a package from `packages.json`.
     pub fn unregister_package(&self, package_id: &str) -> Result<()> {
         let mut registry = self.load_registry()?;
