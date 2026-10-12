@@ -280,6 +280,30 @@ impl PackageInstaller {
                 AsterError::Runtime(format!("Package '{package_id}' is not installed."))
             })?;
 
+        // Validate local registry command metadata before moving the installed
+        // package or changing registry state. These names are later used as
+        // paths beneath the command directory during upgrade cleanup/rollback.
+        let old_binaries = match old_info.get("provided_binaries").and_then(Value::as_array) {
+            Some(arr) => arr
+                .iter()
+                .map(|value| {
+                    value.as_str().map(String::from).ok_or_else(|| {
+                        AsterError::Runtime(format!(
+                            "Cannot safely upgrade '{package_id}': invalid recorded command metadata."
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?,
+            None => {
+                return Err(AsterError::Runtime(format!(
+                    "Cannot safely upgrade '{package_id}': missing or invalid recorded command metadata."
+                )));
+            }
+        };
+        for binary_name in &old_binaries {
+            validate_binary_name(binary_name)?;
+        }
+
         let pkg_dir = self.config.packages_dir.join(package_id);
         let backup_dir = self
             .config
@@ -319,16 +343,6 @@ impl PackageInstaller {
                 "Failed to unregister '{package_id}' before upgrade: {e}.{restore_err_msg}"
             )));
         }
-
-        let old_binaries: Vec<String> = old_info
-            .get("provided_binaries")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|b| b.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
 
         let install_res = self.install(package_id, auto_yes, verbose);
         let newly_installed = self.registry.is_installed(package_id).unwrap_or(false);
@@ -1928,6 +1942,23 @@ fn detect_compression(file: std::fs::File) -> Result<Box<dyn Read>> {
     }
 }
 
+/// Rejects archive paths that could escape the extraction directory while
+/// allowing harmless filenames that happen to contain consecutive dots.
+fn is_safe_archive_entry_path(name: &str) -> bool {
+    if name.is_empty() || name.contains('\0') || name.contains('\\') {
+        return false;
+    }
+
+    let path = Path::new(name);
+    !path.is_absolute()
+        && path.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+}
+
 fn extract_tar(archive_path: &Path, dest: &Path) -> Result<()> {
     let file = std::fs::File::open(archive_path)?;
     let reader = detect_compression(file)?;
@@ -1936,7 +1967,7 @@ fn extract_tar(archive_path: &Path, dest: &Path) -> Result<()> {
         let mut entry = entry?;
         let path = entry.path()?.into_owned();
         let name = path.to_string_lossy().to_string();
-        if name.starts_with('/') || name.contains("..") {
+        if !is_safe_archive_entry_path(&name) {
             return Err(AsterError::Runtime(format!(
                 "Unsafe file path in archive: {name}"
             )));
@@ -1954,7 +1985,7 @@ fn extract_zip(archive_path: &Path, dest: &Path) -> Result<()> {
             .by_index(i)
             .map_err(|e| AsterError::Other(e.to_string()))?;
         let name = entry.name().to_string();
-        if name.starts_with('/') || name.contains("..") {
+        if !is_safe_archive_entry_path(&name) {
             return Err(AsterError::Runtime(format!(
                 "Unsafe file path in archive: {name}"
             )));
@@ -2022,6 +2053,41 @@ fn value_to_string_list(v: &Value) -> Vec<String> {
             .filter_map(|x| x.as_str().map(String::from))
             .collect(),
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod archive_path_tests {
+    use super::is_safe_archive_entry_path;
+
+    #[test]
+    fn rejects_archive_traversal_but_allows_dot_sequences_in_names() {
+        for path in [
+            "",
+            "/etc/passwd",
+            "../outside",
+            "nested/../outside",
+            r"..\outside",
+            r"nested\..\outside",
+            "embedded\0nul",
+        ] {
+            assert!(
+                !is_safe_archive_entry_path(path),
+                "should reject unsafe archive path {path:?}"
+            );
+        }
+
+        for path in [
+            "bin/aster",
+            "./bin/aster",
+            "share/doc/foo..bar",
+            "lib/foo..so",
+        ] {
+            assert!(
+                is_safe_archive_entry_path(path),
+                "should allow safe archive path {path:?}"
+            );
+        }
     }
 }
 
