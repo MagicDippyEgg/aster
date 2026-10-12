@@ -2149,4 +2149,46 @@ mod failed_install_cleanup_tests {
             "failed install cleanup must not leave a dangling command symlink"
         );
     }
+
+    #[test]
+    fn rejects_unsafe_recorded_commands_before_moving_package_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = AsterConfig::with_root_dir(temp.path().join("aster"));
+        let registry = RegistryManager::new(config.clone()).unwrap();
+        let catalogue = CatalogueManager::new(config.clone()).unwrap();
+        let package_dir = config.packages_dir.join("bad-metadata-pkg");
+        std::fs::create_dir_all(package_dir.join("bin")).unwrap();
+        std::fs::write(package_dir.join("bin/app"), b"existing package").unwrap();
+
+        let registry_data = serde_json::json!({
+            "schema_version": 1,
+            "installed": {
+                "bad-metadata-pkg": {
+                    "name": "Bad Metadata Package",
+                    "version": "1.0.0",
+                    "type": "binary",
+                    "install_dir": "packages/bad-metadata-pkg",
+                    "installed_files": ["bin/app"],
+                    "provided_binaries": ["../outside"],
+                    "source_repository": "default"
+                }
+            }
+        });
+        config
+            .save_json_atomic(&config.packages_json, &registry_data)
+            .unwrap();
+
+        let installer = PackageInstaller::new(config.clone(), registry.clone(), catalogue);
+        let error = installer
+            .upgrade_package("bad-metadata-pkg", true, false)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("Invalid command name"));
+        assert!(package_dir.is_dir());
+        assert!(!config
+            .packages_dir
+            .join("bad-metadata-pkg.upgrade_backup")
+            .exists());
+        assert!(registry.is_installed("bad-metadata-pkg").unwrap());
+    }
 }
