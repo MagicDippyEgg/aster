@@ -1437,3 +1437,69 @@ fn test_upgrade_binary_names_change_removes_stale_symlinks() {
         "stale command link should have been removed"
     );
 }
+
+#[test]
+fn test_upgrade_retry_with_existing_backup_errors() {
+    let f = Fixture::new();
+
+    let repo_dir = f.temp.path().join("retry_repo");
+    fs::create_dir_all(repo_dir.join("packages")).unwrap();
+
+    let v1_archive = f.temp.path().join("retry-1.0.0.tar.gz");
+    make_tar_gz(
+        &v1_archive,
+        &[("bin/retrypkg", b"#!/bin/sh\necho v1", 0o755)],
+    );
+
+    write_json(
+        &repo_dir.join("index.json"),
+        &json!({
+            "schema_version": 1,
+            "packages": {
+                "retrypkg": {"definition": "packages/retrypkg.json", "type": "binary", "description": "Retry Pkg"}
+            }
+        }),
+    );
+    write_json(
+        &repo_dir.join("packages/retrypkg.json"),
+        &json!({
+            "schema_version": 1,
+            "id": "retrypkg",
+            "name": "retrypkg",
+            "version": "1.0.0",
+            "type": "binary",
+            "downloads": {
+                "linux-x86_64": {"url": format!("file://{}", v1_archive.display())},
+                "linux-aarch64": {"url": format!("file://{}", v1_archive.display())}
+            }
+        }),
+    );
+
+    let repos = json!({
+        "schema_version": 1,
+        "repositories": {
+            "default": {"name": "default", "url": repo_dir.to_string_lossy(), "priority": 100}
+        }
+    });
+    f.config
+        .save_json_atomic(&f.config.repositories_json, &repos)
+        .unwrap();
+
+    f.catalogue().update_all().unwrap();
+    f.installer().install("retrypkg", true, false).unwrap();
+
+    // Manually create a recovery backup directory to simulate a previously preserved backup
+    let backup_dir = f.config.packages_dir.join("retrypkg.upgrade_backup");
+    fs::create_dir_all(&backup_dir).unwrap();
+    fs::write(backup_dir.join("preserved_file"), b"important").unwrap();
+
+    // Attempt upgrade, verify it refuses to overwrite the recovery backup
+    let err = f
+        .installer()
+        .upgrade_package("retrypkg", true, false)
+        .unwrap_err();
+    assert!(err.to_string().contains("recovery backup"));
+
+    // Verify backup was NOT deleted
+    assert!(backup_dir.join("preserved_file").exists());
+}

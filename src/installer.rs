@@ -284,7 +284,10 @@ impl PackageInstaller {
             .join(format!("{package_id}.upgrade_backup"));
 
         if backup_dir.exists() {
-            let _ = std::fs::remove_dir_all(&backup_dir);
+            return Err(AsterError::Runtime(format!(
+                "An existing recovery backup for '{package_id}' was found at '{}'. Please inspect or remove it before attempting an upgrade.",
+                backup_dir.display()
+            )));
         }
 
         if pkg_dir.exists() {
@@ -292,11 +295,14 @@ impl PackageInstaller {
         }
 
         if let Err(e) = self.registry.unregister_package(package_id) {
+            let mut restore_err_msg = String::new();
             if backup_dir.exists() {
-                let _ = std::fs::rename(&backup_dir, &pkg_dir);
+                if let Err(rename_err) = std::fs::rename(&backup_dir, &pkg_dir) {
+                    restore_err_msg = format!(" Also failed to restore package directory ({rename_err}); backup preserved at '{}'.", backup_dir.display());
+                }
             }
             return Err(AsterError::Runtime(format!(
-                "Failed to unregister '{package_id}' before upgrade: {e}"
+                "Failed to unregister '{package_id}' before upgrade: {e}.{restore_err_msg}"
             )));
         }
 
@@ -330,6 +336,8 @@ impl PackageInstaller {
             let backup_resolved =
                 std::fs::canonicalize(&backup_dir).unwrap_or_else(|_| backup_dir.clone());
 
+            let mut cleanup_warnings = Vec::new();
+
             for old_bin in &old_binaries {
                 if !new_binaries.contains(old_bin) {
                     let link_path = self.config.bin_dir.join(old_bin);
@@ -358,15 +366,33 @@ impl PackageInstaller {
                             }
                         };
                         if belongs_to_package {
-                            let _ = std::fs::remove_file(&link_path);
+                            if let Err(e) = std::fs::remove_file(&link_path) {
+                                cleanup_warnings.push(format!(
+                                    "failed to remove obsolete command link '{}': {e}",
+                                    link_path.display()
+                                ));
+                            }
                         }
                     }
                 }
             }
 
             if backup_dir.exists() {
-                let _ = std::fs::remove_dir_all(&backup_dir);
+                if let Err(e) = std::fs::remove_dir_all(&backup_dir) {
+                    cleanup_warnings.push(format!(
+                        "failed to remove upgrade backup directory '{}': {e}",
+                        backup_dir.display()
+                    ));
+                }
             }
+
+            if !cleanup_warnings.is_empty() {
+                eprintln!(
+                    "Upgrade completed for '{package_id}' with cleanup warning(s): {}",
+                    cleanup_warnings.join("; ")
+                );
+            }
+
             Ok(())
         } else {
             eprintln!("Upgrade failed for '{package_id}'. Rolling back to previous version...");
