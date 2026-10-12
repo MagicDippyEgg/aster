@@ -193,9 +193,9 @@ impl RegistryManager {
                             Err(_) => {
                                 if let Ok(raw_target) = std::fs::read_link(&link_path) {
                                     let raw_path = if raw_target.is_relative() {
-                                        self.config.bin_dir.join(&raw_target)
+                                        crate::util::normalize_path_lexically(&self.config.bin_dir.join(&raw_target))
                                     } else {
-                                        raw_target
+                                        crate::util::normalize_path_lexically(&raw_target)
                                     };
                                     raw_path.starts_with(&pkg_resolved)
                                         || raw_path.starts_with(&pkg_dir)

@@ -5,6 +5,7 @@ use crate::config::{get_build_env, AsterConfig};
 use crate::error::{AsterError, Result};
 use crate::registry::RegistryManager;
 use crate::resolver::DependencyResolver;
+use crate::util::normalize_path_lexically;
 use crate::util::{
     collect_files, exists_or_symlink, find_file, is_executable, py_get_bool, py_str, set_mode,
     which,
@@ -283,16 +284,27 @@ impl PackageInstaller {
             .packages_dir
             .join(format!("{package_id}.upgrade_backup"));
 
-        if backup_dir.exists() {
+        if exists_or_symlink(&backup_dir) {
             return Err(AsterError::Runtime(format!(
                 "An existing recovery backup for '{package_id}' was found at '{}'. Please inspect or remove it before attempting an upgrade.",
                 backup_dir.display()
             )));
         }
 
-        if pkg_dir.exists() {
-            std::fs::rename(&pkg_dir, &backup_dir)?;
+        let pkg_metadata = std::fs::symlink_metadata(&pkg_dir).map_err(|e| {
+            AsterError::Runtime(format!(
+                "Cannot safely upgrade '{package_id}': installed package directory '{}' cannot be accessed: {e}",
+                pkg_dir.display()
+            ))
+        })?;
+        if !pkg_metadata.is_dir() {
+            return Err(AsterError::Runtime(format!(
+                "Cannot safely upgrade '{package_id}': installed package path '{}' is not a real directory.",
+                pkg_dir.display()
+            )));
         }
+
+        std::fs::rename(&pkg_dir, &backup_dir)?;
 
         if let Err(e) = self.registry.unregister_package(package_id) {
             let mut restore_err_msg = String::new();
@@ -352,9 +364,9 @@ impl PackageInstaller {
                             Err(_) => {
                                 if let Ok(raw_target) = std::fs::read_link(&link_path) {
                                     let raw_path = if raw_target.is_relative() {
-                                        self.config.bin_dir.join(&raw_target)
+                                        normalize_path_lexically(&self.config.bin_dir.join(&raw_target))
                                     } else {
-                                        raw_target
+                                        normalize_path_lexically(&raw_target)
                                     };
                                     raw_path.starts_with(&pkg_resolved)
                                         || raw_path.starts_with(&pkg_dir)
@@ -401,41 +413,48 @@ impl PackageInstaller {
 
             let mut rollback_errors = Vec::new();
 
-            if backup_dir.exists() {
-                if let Err(e) = std::fs::rename(&backup_dir, &pkg_dir) {
-                    rollback_errors.push(format!(
-                        "failed to restore package directory ({e}); backup preserved at '{}' for manual recovery",
-                        backup_dir.display()
-                    ));
+            let restored_old_dir = if exists_or_symlink(&backup_dir) {
+                match std::fs::rename(&backup_dir, &pkg_dir) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        rollback_errors.push(format!(
+                            "failed to restore package directory ({e}); backup preserved at '{}' for manual recovery",
+                            backup_dir.display()
+                        ));
+                        false
+                    }
                 }
-            }
+            } else {
+                rollback_errors.push(format!(
+                    "recovery backup '{}' is missing; the previous package directory cannot be restored",
+                    backup_dir.display()
+                ));
+                false
+            };
 
-            if pkg_dir.exists() {
+            if restored_old_dir {
                 if let Err(e) = self.create_symlinks(&pkg_dir, &old_binaries) {
                     rollback_errors.push(format!("failed to restore command symlinks: {e}"));
                 }
-            }
 
-            match self.registry.load_registry() {
-                Ok(mut reg) => {
-                    if let Some(Value::Object(map)) = reg.get_mut("installed") {
-                        map.insert(package_id.to_string(), old_info);
-                        if let Err(e) = self.registry.save_registry(&reg) {
-                            rollback_errors.push(format!("failed to restore registry entry: {e}"));
+                match self.registry.load_registry() {
+                    Ok(mut reg) => {
+                        match reg.get_mut("installed") {
+                            Some(Value::Object(map)) => {
+                                map.insert(package_id.to_string(), old_info);
+                                if let Err(e) = self.registry.save_registry(&reg) {
+                                    rollback_errors.push(format!("failed to restore registry entry: {e}"));
+                                }
+                            }
+                            _ => rollback_errors.push(
+                                "failed to restore registry entry: registry has no valid 'installed' map".to_string()
+                            ),
                         }
                     }
+                    Err(e) => {
+                        rollback_errors.push(format!("failed to load registry during rollback: {e}"));
+                    }
                 }
-                Err(e) => {
-                    rollback_errors.push(format!("failed to load registry during rollback: {e}"));
-                }
-            }
-
-            if backup_dir.exists()
-                && !rollback_errors
-                    .iter()
-                    .any(|e| e.contains("failed to restore package directory"))
-            {
-                let _ = std::fs::remove_dir_all(&backup_dir);
             }
 
             let install_err_desc = match install_res {

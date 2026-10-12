@@ -2,7 +2,7 @@
 
 use crate::config::{fetch_url, AsterConfig};
 use crate::error::{AsterError, Result};
-use crate::schema::{validate_index, validate_package_definition};
+use crate::schema::{validate_index, validate_package_definition, validate_package_id};
 use crate::util::py_str;
 use serde_json::{Map, Value};
 use std::fs;
@@ -186,6 +186,7 @@ impl CatalogueManager {
         package_id: &str,
         repo_name: Option<&str>,
     ) -> Result<Option<(Value, String)>> {
+        validate_package_id(package_id)?;
         let repos = self.get_repositories()?;
         let target_repos: Vec<(String, Value)> = match repo_name {
             Some(name) => match repos.get(name) {
@@ -215,11 +216,12 @@ impl CatalogueManager {
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("packages/{package_id}.json"));
 
+            validate_definition_path(&def_path)?;
             let cached_def_file = self.config.repository_cache.join(&rname).join(&def_path);
             if cached_def_file.exists() {
                 let map = self.config.load_json(&cached_def_file)?;
                 let data = Value::Object(map);
-                validate_package_definition(&data)?;
+                validate_definition_for_id(&data, package_id)?;
                 return Ok(Some((data, rname)));
             }
 
@@ -253,12 +255,82 @@ impl CatalogueManager {
                 serde_json::from_str(&text).map_err(AsterError::Json)?
             };
 
-            validate_package_definition(&data)?;
+            validate_definition_for_id(&data, package_id)?;
             self.config.save_json_atomic(&cached_def_file, &data)?;
             return Ok(Some((data, rname)));
         }
 
         Ok(None)
+    }
+}
+
+fn validate_definition_for_id(data: &Value, expected_id: &str) -> Result<()> {
+    validate_package_definition(data)?;
+    let actual_id = data
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if actual_id != expected_id {
+        return Err(AsterError::Validation(format!(
+            "Package ID mismatch: catalogue index requested '{expected_id}', but its definition declares '{actual_id}'."
+        )));
+    }
+    Ok(())
+}
+
+fn validate_definition_path(path: &str) -> Result<()> {
+    let safe = !path.is_empty()
+        && !path.contains('\\')
+        && !path.contains('\0')
+        && !path.contains('?')
+        && !path.contains('#')
+        && !path.contains('%')
+        && !path.contains(':')
+        && path
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..");
+    if !safe {
+        return Err(AsterError::Validation(format!(
+            "Unsafe package definition path in catalogue: '{path}'."
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn definition_paths_must_remain_relative_and_unambiguous() {
+        for path in [
+            "",
+            "/etc/passwd",
+            "../outside.json",
+            "packages/../../outside.json",
+            "packages\\outside.json",
+            "packages/foo.json?x=1",
+            "packages/foo.json#section",
+            "packages/%2e%2e/outside.json",
+            "C:/outside.json",
+        ] {
+            assert!(validate_definition_path(path).is_err(), "should reject {path:?}");
+        }
+        assert!(validate_definition_path("packages/fastfetch-bin.json").is_ok());
+        assert!(validate_definition_path("vendor/pkg/definition.json").is_ok());
+    }
+
+    #[test]
+    fn package_definition_must_match_catalogue_key() {
+        let data = serde_json::json!({
+            "schema_version": 1,
+            "id": "other-package",
+            "name": "Other",
+            "version": "1.0.0",
+            "type": "binary"
+        });
+        assert!(validate_definition_for_id(&data, "requested-package").is_err());
+        assert!(validate_definition_for_id(&data, "other-package").is_ok());
     }
 }
 

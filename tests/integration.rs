@@ -1439,6 +1439,27 @@ fn test_upgrade_binary_names_change_removes_stale_symlinks() {
 }
 
 #[test]
+fn test_upgrade_missing_package_directory_refuses_without_mutation() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+    assert_eq!(code(&f.run_cli(&["install", "fastfetch-bin"])), 0);
+
+    let info_before = f.registry().get_installed_package("fastfetch-bin").unwrap().unwrap();
+    let pkg_dir = f.config.packages_dir.join("fastfetch-bin");
+    fs::remove_dir_all(&pkg_dir).unwrap();
+
+    let err = f
+        .installer()
+        .upgrade_package("fastfetch-bin", true, false)
+        .unwrap_err();
+    assert!(err.to_string().contains("Cannot safely upgrade"));
+    assert!(f.registry().is_installed("fastfetch-bin").unwrap());
+    let info_after = f.registry().get_installed_package("fastfetch-bin").unwrap().unwrap();
+    assert_eq!(info_after["version"], info_before["version"]);
+    assert!(!f.config.packages_dir.join("fastfetch-bin.upgrade_backup").exists());
+}
+
+#[test]
 fn test_upgrade_retry_with_existing_backup_errors() {
     let f = Fixture::new();
 
