@@ -1538,3 +1538,53 @@ fn test_upgrade_retry_with_existing_backup_errors() {
     // Verify backup was NOT deleted
     assert!(backup_dir.join("preserved_file").exists());
 }
+
+
+#[test]
+fn test_make_install_failure_is_reported_and_not_registered() {
+    let f = Fixture::new();
+
+    let archive = f.temp.path().join("failing-make-install.tar.gz");
+    let makefile = b"all:\n\t@echo build complete\ninstall:\n\t@echo deliberate failure >&2\n\t@false\n";
+    make_tar_gz(&archive, &[("Makefile", makefile, 0o644)]);
+
+    let pkg_def = json!({
+        "schema_version": 1,
+        "id": "failing-make-install",
+        "name": "Failing Make Install",
+        "version": "1.0.0",
+        "type": "source",
+        "source": {
+            "type": "tar.gz",
+            "url": format!("file://{}", archive.display())
+        },
+        "build": {"system": "make"}
+    });
+
+    let err = f
+        .installer()
+        .install_source_from(&pkg_def, true, false, "test")
+        .unwrap_err();
+    assert!(err.to_string().contains("Make install failed"));
+    assert!(!f.registry().is_installed("failing-make-install").unwrap());
+    assert!(!f.config.packages_dir.join("failing-make-install").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_verify_rejects_package_directory_symlink() {
+    let f = Fixture::new();
+    f.catalogue().update_all().unwrap();
+    f.installer().install("fastfetch-bin", true, false).unwrap();
+
+    let package_dir = f.config.packages_dir.join("fastfetch-bin");
+    let moved_dir = f.temp.path().join("moved-fastfetch-package");
+    fs::rename(&package_dir, &moved_dir).unwrap();
+    std::os::unix::fs::symlink(&moved_dir, &package_dir).unwrap();
+
+    let issues = f.registry().verify_package("fastfetch-bin").unwrap();
+    assert!(
+        issues.iter().any(|issue| issue.contains("not a real directory")),
+        "verification should flag a package directory replaced by a symlink; got: {issues:?}"
+    );
+}

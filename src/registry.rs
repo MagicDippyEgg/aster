@@ -163,20 +163,42 @@ impl RegistryManager {
         let pkg_dir = self.config.packages_dir.join(package_id);
         let pkg_resolved = std::fs::canonicalize(&pkg_dir).unwrap_or_else(|_| pkg_dir.clone());
 
-        if !pkg_dir.exists() || !pkg_dir.is_dir() {
-            issues.push(format!("Missing package directory: {}", pkg_dir.display()));
-        } else if let Some(files) = info.get("installed_files").and_then(|v| v.as_array()) {
-            for f in files {
-                if let Some(rel) = f.as_str() {
-                    if !is_safe_recorded_file_path(rel) {
-                        issues.push(format!("Unsafe recorded file path: {rel}"));
-                        continue;
-                    }
-                    let fpath = pkg_dir.join(rel);
-                    if !crate::util::exists_or_symlink(&fpath) {
-                        issues.push(format!("Missing recorded file: {rel}"));
-                    } else if fpath.is_symlink() && !fpath.exists() {
-                        issues.push(format!("Broken recorded symlink: {rel}"));
+        let package_dir_is_real = match std::fs::symlink_metadata(&pkg_dir) {
+            Ok(metadata) if metadata.file_type().is_dir() => true,
+            Ok(_) => {
+                issues.push(format!(
+                    "Package path is not a real directory: {}",
+                    pkg_dir.display()
+                ));
+                false
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                issues.push(format!("Missing package directory: {}", pkg_dir.display()));
+                false
+            }
+            Err(e) => {
+                issues.push(format!(
+                    "Cannot inspect package directory '{}': {e}",
+                    pkg_dir.display()
+                ));
+                false
+            }
+        };
+
+        if package_dir_is_real {
+            if let Some(files) = info.get("installed_files").and_then(|v| v.as_array()) {
+                for f in files {
+                    if let Some(rel) = f.as_str() {
+                        if !is_safe_recorded_file_path(rel) {
+                            issues.push(format!("Unsafe recorded file path: {rel}"));
+                            continue;
+                        }
+                        let fpath = pkg_dir.join(rel);
+                        if !crate::util::exists_or_symlink(&fpath) {
+                            issues.push(format!("Missing recorded file: {rel}"));
+                        } else if fpath.is_symlink() && !fpath.exists() {
+                            issues.push(format!("Broken recorded symlink: {rel}"));
+                        }
                     }
                 }
             }

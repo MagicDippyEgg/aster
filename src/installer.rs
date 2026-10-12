@@ -1180,7 +1180,13 @@ impl PackageInstaller {
                 format!("DESTDIR={}", staging_dir.to_string_lossy()),
                 "install".to_string(),
             ];
-            let _res = self.executor.run(&install_cmd, None, &build_env, verbose)?;
+            let res = self.executor.run(&install_cmd, None, &build_env, verbose)?;
+            if res.code != 0 {
+                return Err(self.handle_build_failure(
+                    &format!("{}\n{}", res.stdout, res.stderr),
+                    "Make install",
+                ));
+            }
         }
 
         // Prefer executables that the build system installed into the staging
