@@ -4,6 +4,7 @@ use crate::catalogue::{display_priority, CatalogueManager};
 use crate::config::AsterConfig;
 use crate::installer::PackageInstaller;
 use crate::registry::RegistryManager;
+use crate::schema::validate_repository_name;
 use crate::util::py_str;
 use crate::version::compare_versions;
 use clap::{CommandFactory, Parser, Subcommand};
@@ -738,6 +739,7 @@ fn repo(
             url,
             priority,
         }) => {
+            validate_repository_name(&name)?;
             let mut entry = Map::new();
             entry.insert("name".to_string(), json!(name));
             entry.insert("url".to_string(), json!(url));

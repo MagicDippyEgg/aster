@@ -197,12 +197,29 @@ pub fn get_build_env(
         prefix_dirs.extend(extra.iter().cloned());
     }
 
+    // The package being upgraded is temporarily unregistered and renamed to
+    // "<id>.upgrade_backup". Do not expose that old version to the replacement
+    // build through compiler, linker, pkg-config, or CMake search paths.
+    let installed_package_ids = config
+        .load_json(&config.packages_json)
+        .ok()
+        .and_then(|data| data.get("installed").and_then(Value::as_object).cloned())
+        .unwrap_or_default();
+
     if config.packages_dir.exists() {
         if let Ok(rd) = fs::read_dir(&config.packages_dir) {
             for entry in rd.flatten() {
-                if entry.path().is_dir() {
-                    prefix_dirs.push(entry.path());
+                // Do not follow symlinked package directories into arbitrary
+                // locations while building compiler/linker search paths.
+                if !entry.file_type().map(|ty| ty.is_dir()).unwrap_or(false) {
+                    continue;
                 }
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.ends_with(".upgrade_backup") && !installed_package_ids.contains_key(&name) {
+                    continue;
+                }
+                prefix_dirs.push(path);
             }
         }
     }
