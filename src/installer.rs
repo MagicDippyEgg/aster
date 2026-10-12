@@ -2070,10 +2070,7 @@ mod source_archive_extension_tests {
     #[test]
     fn infers_archive_type_without_url_query_or_fragment() {
         assert_eq!(
-            source_archive_extension(
-                "url",
-                "https://example.invalid/source.zip?download=1#asset"
-            ),
+            source_archive_extension("url", "https://example.invalid/source.zip?download=1#asset"),
             ".zip"
         );
         assert_eq!(
