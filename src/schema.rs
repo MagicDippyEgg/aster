@@ -89,11 +89,32 @@ pub fn validate_index(data: &Value) -> Result<()> {
         .as_object()
         .ok_or_else(|| AsterError::Validation("Index must be a JSON object.".to_string()))?;
     match obj.get("packages") {
-        Some(Value::Object(_)) => Ok(()),
-        _ => Err(AsterError::Validation(
-            "Index missing 'packages' dictionary.".to_string(),
-        )),
+        Some(Value::Object(_)) => {}
+        _ => {
+            return Err(AsterError::Validation(
+                "Index missing 'packages' dictionary.".to_string(),
+            ))
+        }
     }
+
+    if let Some(sv) = obj.get("schema_version") {
+        let version = sv.as_i64().or_else(|| sv.as_u64().map(|v| v as i64));
+        match version {
+            Some(1) | Some(2) => {}
+            Some(v) => {
+                return Err(AsterError::Validation(format!(
+                    "Unsupported index schema_version '{v}'. Supported versions are 1 and 2."
+                )))
+            }
+            None => {
+                return Err(AsterError::Validation(
+                    "Field 'schema_version' in index must be an integer.".to_string(),
+                ))
+            }
+        }
+    }
+
+    Ok(())
 }
 
 pub fn validate_registry(data: &Value) -> Result<()> {
@@ -135,6 +156,37 @@ mod tests {
         for id in ["fastfetch-bin", "python3.12", "lib_foo", "c++", "7zip"] {
             assert!(validate_package_id(id).is_ok(), "should accept {id:?}");
         }
+    }
+
+    #[test]
+    fn validate_index_schema_versions() {
+        use serde_json::json;
+
+        // Schema version 1
+        assert!(validate_index(&json!({"schema_version": 1, "packages": {}})).is_ok());
+
+        // Schema version 2
+        assert!(validate_index(&json!({"schema_version": 2, "packages": {}})).is_ok());
+
+        // Schema version 2 with metadata
+        assert!(validate_index(&json!({
+            "schema_version": 2,
+            "description": "Test Repo",
+            "packages": {}
+        }))
+        .is_ok());
+
+        // Missing schema_version (backwards compatible defaults to 1)
+        assert!(validate_index(&json!({"packages": {}})).is_ok());
+
+        // Unsupported schema_version
+        assert!(validate_index(&json!({"schema_version": 3, "packages": {}})).is_err());
+
+        // Non-integer schema_version
+        assert!(validate_index(&json!({"schema_version": "2", "packages": {}})).is_err());
+
+        // Missing packages
+        assert!(validate_index(&json!({"schema_version": 2})).is_err());
     }
 
     #[test]

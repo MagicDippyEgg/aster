@@ -61,9 +61,45 @@ aster-package-repository/
 
 ## 1. The Repository Index (`index.json`)
 
-The `index.json` file resides at the root of the repository.
+The `index.json` file resides at the root of the repository. Aster supports both **Schema Version 2** (recommended) and **Schema Version 1** (legacy).
 
-### Schema
+### Schema Version 2 (Recommended)
+
+Schema Version 2 introduces repository-level metadata, such as a description, maintainer, and homepage. This information is displayed when running `aster repo info <repo-name>`.
+
+```json
+{
+  "schema_version": 2,
+  "description": "Official Aster Package Repository",
+  "maintainer": "Aster Core Team",
+  "homepage": "https://github.com/MagicDippyEgg/aster",
+  "packages": {
+    "<package_id>": {
+      "definition": "packages/<package_id>.json",
+      "type": "binary",
+      "description": "Short description of the package"
+    }
+  }
+}
+```
+
+*Metadata fields can also be placed inside a nested `"metadata"` object if preferred:*
+
+```json
+{
+  "schema_version": 2,
+  "metadata": {
+    "description": "Official Aster Package Repository",
+    "maintainer": "Aster Core Team",
+    "homepage": "https://github.com/MagicDippyEgg/aster"
+  },
+  "packages": { ... }
+}
+```
+
+### Schema Version 1 (Legacy)
+
+Schema Version 1 is supported for backward compatibility:
 
 ```json
 {
@@ -82,17 +118,24 @@ The `index.json` file resides at the root of the repository.
 
 ### Field Specifications
 
-- `schema_version` (*integer*, required): Must be `1`.
+- `schema_version` (*integer*, required): `2` for Schema Version 2 or `1` for legacy Schema Version 1.
+- `description` (*string*, optional, Schema 2): Repository description displayed in `aster repo info`.
+- `maintainer` (*string*, optional, Schema 2): Repository maintainer information.
+- `homepage` (*string*, optional, Schema 2): Repository homepage URL.
+- `metadata` (*object*, optional, Schema 2): Optional container object for repository metadata (`description`, `maintainer`, `homepage`).
 - `packages` (*object*, required): A map where each key is a unique package identifier (e.g. `fastfetch-bin` or `eza-src`), and the value is an object containing:
   - `definition` (*string*, required): Relative path from the repository root to the package definition file (e.g. `"packages/fastfetch-bin.json"`).
   - `type` (*string*, required): Either `"binary"` (precompiled release) or `"source"` (compiled locally).
   - `description` (*string*, optional): A short summary displayed in `aster search` results.
 
-### Example `index.json`
+### Example `index.json` (Schema Version 2)
 
 ```json
 {
-    "schema_version": 1,
+    "schema_version": 2,
+    "description": "Official Aster package repository containing precompiled binaries and source recipes",
+    "maintainer": "Aster Team",
+    "homepage": "https://github.com/MagicDippyEgg/aster",
     "packages": {
         "bat-bin": {
             "definition": "packages/bat-bin.json",

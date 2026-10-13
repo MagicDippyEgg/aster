@@ -605,6 +605,86 @@ fn test_repository_priority_resolution() {
 }
 
 #[test]
+fn test_repo_info_command() {
+    let f = Fixture::new();
+    f.catalogue().update_all().unwrap();
+
+    // Test default repo (schema version 1)
+    let out = f.run_cli(&["repo", "info", "default"]);
+    assert_eq!(code(&out), 0);
+    let stdout_text = stdout(&out);
+    assert!(stdout_text.contains("Repository: default"));
+    assert!(stdout_text.contains("Priority:       100"));
+    assert!(stdout_text.contains("Schema Version: 1"));
+    assert!(stdout_text.contains("Packages:       6"));
+    assert!(stdout_text.contains("Description:    N/A"));
+
+    // Test schema version 2 repo with metadata
+    let v2_dir = f.temp.path().join("repo_v2");
+    fs::create_dir_all(v2_dir.join("packages")).unwrap();
+    write_json(
+        &v2_dir.join("index.json"),
+        &json!({
+            "schema_version": 2,
+            "description": "Secondary Schema 2 Package Repository",
+            "maintainer": "Community Maintainers",
+            "homepage": "https://example.com/v2-repo",
+            "packages": {
+                "pkg-a": {"definition": "packages/pkg-a.json", "type": "binary", "description": "Package A"}
+            }
+        }),
+    );
+
+    let repos = json!({
+        "schema_version": 1,
+        "repositories": {
+            "default": {"name": "default", "url": f.cat_dir.to_string_lossy(), "priority": 100},
+            "v2-repo": {"name": "v2-repo", "url": v2_dir.to_string_lossy(), "priority": 250}
+        }
+    });
+    f.config
+        .save_json_atomic(&f.config.repositories_json, &repos)
+        .unwrap();
+
+    f.catalogue().update_all().unwrap();
+
+    let out_v2 = f.run_cli(&["repo", "info", "v2-repo"]);
+    assert_eq!(code(&out_v2), 0);
+    let stdout_v2 = stdout(&out_v2);
+    assert!(stdout_v2.contains("Repository: v2-repo"));
+    assert!(stdout_v2.contains("Priority:       250"));
+    assert!(stdout_v2.contains("Schema Version: 2"));
+    assert!(stdout_v2.contains("Packages:       1"));
+    assert!(stdout_v2.contains("Description:    Secondary Schema 2 Package Repository"));
+    assert!(stdout_v2.contains("Maintainer:     Community Maintainers"));
+    assert!(stdout_v2.contains("Homepage:       https://example.com/v2-repo"));
+
+    // Test non-existent repo
+    let out_err = f.run_cli(&["repo", "info", "nonexistent-repo"]);
+    assert_eq!(code(&out_err), 1);
+    assert!(stdout(&out_err).contains("Repository 'nonexistent-repo' not found."));
+
+    // Test uncached repo with invalid URL/path propagates error
+    let invalid_dir = f.temp.path().join("nonexistent_path");
+    let repos_invalid = json!({
+        "schema_version": 1,
+        "repositories": {
+            "invalid-repo": {"name": "invalid-repo", "url": invalid_dir.to_string_lossy(), "priority": 100}
+        }
+    });
+    f.config
+        .save_json_atomic(&f.config.repositories_json, &repos_invalid)
+        .unwrap();
+
+    let out_fetch_err = f.run_cli(&["repo", "info", "invalid-repo"]);
+    assert_eq!(code(&out_fetch_err), 1);
+    assert!(
+        stderr(&out_fetch_err).contains("Local catalogue index file not found")
+            || stderr(&out_fetch_err).contains("Error")
+    );
+}
+
+#[test]
 fn test_cli_repo_priority_commands() {
     let f = Fixture::new();
 
