@@ -98,9 +98,7 @@ pub fn validate_index(data: &Value) -> Result<()> {
     }
 
     if let Some(sv) = obj.get("schema_version") {
-        let version = sv
-            .as_i64()
-            .or_else(|| sv.as_u64().map(|v| v as i64));
+        let version = sv.as_i64().or_else(|| sv.as_u64().map(|v| v as i64));
         match version {
             Some(1) | Some(2) => {}
             Some(v) => {
@@ -175,7 +173,8 @@ mod tests {
             "schema_version": 2,
             "description": "Test Repo",
             "packages": {}
-        })).is_ok());
+        }))
+        .is_ok());
 
         // Missing schema_version (backwards compatible defaults to 1)
         assert!(validate_index(&json!({"packages": {}})).is_ok());
