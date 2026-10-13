@@ -52,7 +52,9 @@ In a **Recipe-only repository** (such as the default repository), the host only 
 - **How it works:** Package JSON files point directly to upstream URLs (e.g., GitHub Releases, project Git repositories, or vendor tarballs).
 - **Advantages:** Lightweight repository footprint, easy to maintain, and requires no storage or bandwidth for mirroring upstream files.
 
-#### Example Definition (Upstream Binary)
+#### Example Definition Excerpt (Upstream Binary Download)
+*(Excerpt showing the `downloads` section of a binary package definition pointing directly to upstream release assets)*
+
 ```json
 {
     "downloads": {
@@ -71,7 +73,7 @@ In a **Recipe-only repository** (such as the default repository), the host only 
 A **Fully Hosted repository** hosts repository metadata, package recipes, precompiled binary archives, and source code archives/repositories together on the same server or internal storage infrastructure.
 
 - **How it works:** The repository web server hosts precompiled binary tarballs or source code archives (and/or self-hosted Git repositories) directly alongside `index.json` and `packages/` (e.g. under `binaries/` or `sources/`). All `url` references in package definitions point to files or Git repositories hosted on the repository server or internal network.
-- **Advantages:** Complete control over distribution, immunity to broken upstream download links, and full support for offline, air-gapped, or internal enterprise local networks.
+- **Advantages:** Complete control over distribution, immunity to broken upstream download links, and potential for offline, air-gapped, or internal enterprise local network use (note: source package builds may still require network access unless build toolchains and dependencies are pre-installed or vendored).
 
 #### Example Directory Structure
 ```text
@@ -96,8 +98,7 @@ my-hosted-repo/
     "type": "binary",
     "downloads": {
         "linux-x86_64": {
-            "url": "https://repo.internal.net/binaries/mytool-v1.0.0-linux-x86_64.tar.gz",
-            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            "url": "https://repo.internal.net/binaries/mytool-v1.0.0-linux-x86_64.tar.gz"
         }
     }
 }
