@@ -230,12 +230,13 @@ fn get_latest_aster_release_tag() -> crate::error::Result<String> {
     ))
 }
 
-fn self_update(config: &AsterConfig) -> crate::error::Result<i32> {
-    println!("Checking for latest Aster release...");
-    let tag_name = get_latest_aster_release_tag()?;
-    let latest_version = tag_name.trim_start_matches('v').to_string();
-
-    let cmp = compare_versions(crate::VERSION, &latest_version);
+pub fn perform_self_update(
+    config: &AsterConfig,
+    current_exe: &std::path::Path,
+    latest_version: &str,
+    download_url: &str,
+) -> crate::error::Result<i32> {
+    let cmp = compare_versions(crate::VERSION, latest_version);
     if cmp >= 0 {
         println!("Aster is already up to date ({latest_version}).");
         return Ok(0);
@@ -247,15 +248,6 @@ fn self_update(config: &AsterConfig) -> crate::error::Result<i32> {
         latest_version
     );
 
-    let download_url =
-        format!("https://github.com/MagicDippyEgg/aster/releases/download/{tag_name}/aster");
-
-    let current_exe = std::env::current_exe().map_err(|e| {
-        crate::error::AsterError::Runtime(format!(
-            "Failed to determine current executable path: {e}"
-        ))
-    })?;
-
     let target_dir = current_exe
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
@@ -263,13 +255,7 @@ fn self_update(config: &AsterConfig) -> crate::error::Result<i32> {
     let pid = std::process::id();
     let temp_exe = target_dir.join(format!(".aster_self_update_{pid}"));
 
-    let mut fetch_res = crate::config::fetch_url_to_file(&download_url, &temp_exe, None, 60);
-    if fetch_res.is_err() && tag_name != latest_version {
-        let alt_url = format!(
-            "https://github.com/MagicDippyEgg/aster/releases/download/{latest_version}/aster"
-        );
-        fetch_res = crate::config::fetch_url_to_file(&alt_url, &temp_exe, None, 60);
-    }
+    let fetch_res = crate::config::fetch_url_to_file(download_url, &temp_exe, None, 60);
 
     if let Err(e) = fetch_res {
         if temp_exe.exists() {
@@ -280,9 +266,16 @@ fn self_update(config: &AsterConfig) -> crate::error::Result<i32> {
         )));
     }
 
-    crate::util::set_mode(&temp_exe, 0o755)?;
+    if let Err(e) = crate::util::set_mode(&temp_exe, 0o755) {
+        if temp_exe.exists() {
+            let _ = fs::remove_file(&temp_exe);
+        }
+        return Err(crate::error::AsterError::Runtime(format!(
+            "Failed to set permissions on updated binary: {e}"
+        )));
+    }
 
-    if let Err(e) = fs::rename(&temp_exe, &current_exe) {
+    if let Err(e) = fs::rename(&temp_exe, current_exe) {
         if temp_exe.exists() {
             let _ = fs::remove_file(&temp_exe);
         }
@@ -295,20 +288,47 @@ fn self_update(config: &AsterConfig) -> crate::error::Result<i32> {
     if config.aster_bin.exists() {
         let same_path = match (
             fs::canonicalize(&config.aster_bin),
-            fs::canonicalize(&current_exe),
+            fs::canonicalize(current_exe),
         ) {
             (Ok(p1), Ok(p2)) => p1 == p2,
             _ => config.aster_bin == current_exe,
         };
         if !same_path {
-            let _ = fs::copy(&current_exe, &config.aster_bin);
-            let _ = crate::util::set_mode(&config.aster_bin, 0o755);
+            if let Err(e) = fs::copy(current_exe, &config.aster_bin) {
+                return Err(crate::error::AsterError::Runtime(format!(
+                    "Failed to update Aster binary at '{}': {e}",
+                    config.aster_bin.display()
+                )));
+            }
+            if let Err(e) = crate::util::set_mode(&config.aster_bin, 0o755) {
+                return Err(crate::error::AsterError::Runtime(format!(
+                    "Failed to set executable permissions at '{}': {e}",
+                    config.aster_bin.display()
+                )));
+            }
         }
     }
 
     config.log_history(&format!("Updated Aster to version {latest_version}"));
     println!("Successfully updated Aster to version {latest_version}.");
     Ok(0)
+}
+
+fn self_update(config: &AsterConfig) -> crate::error::Result<i32> {
+    println!("Checking for latest Aster release...");
+    let tag_name = get_latest_aster_release_tag()?;
+    let latest_version = tag_name.trim_start_matches('v').to_string();
+
+    let download_url =
+        format!("https://github.com/MagicDippyEgg/aster/releases/download/{tag_name}/aster");
+
+    let current_exe = std::env::current_exe().map_err(|e| {
+        crate::error::AsterError::Runtime(format!(
+            "Failed to determine current executable path: {e}"
+        ))
+    })?;
+
+    perform_self_update(config, &current_exe, &latest_version, &download_url)
 }
 
 fn dispatch(
