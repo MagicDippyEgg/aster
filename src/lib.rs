@@ -11,4 +11,4 @@ pub mod schema;
 pub mod util;
 pub mod version;
 
-pub const VERSION: &str = "0.2.4";
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");

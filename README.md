@@ -2,6 +2,14 @@
 
 A small, source-and-binary package manager written in Rust.
 
+## Installation
+
+To install the latest version of Aster, run the following command in your terminal:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/MagicDippyEgg/aster/refs/heads/main/install.sh | bash
+```
+
 ## Build
 
 ```sh
@@ -18,6 +26,7 @@ aster search <query>       # search available packages
 aster install <package>    # install a package and its dependencies
 aster list                 # list installed packages
 aster remove <package>     # uninstall a package
+aster self-update          # update aster to the latest release
 aster doctor               # check the installation for problems
 ```
 

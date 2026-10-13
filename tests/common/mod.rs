@@ -277,6 +277,10 @@ pub fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).to_string()
 }
 
+pub fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).to_string()
+}
+
 pub fn code(output: &Output) -> i32 {
     output.status.code().unwrap_or(-1)
 }

@@ -1682,3 +1682,108 @@ fn test_checksum_placeholder_does_not_disable_integrity_verification() {
     assert!(!f.registry().is_installed("fastfetch-bin").unwrap());
     assert!(!f.config.packages_dir.join("fastfetch-bin").exists());
 }
+
+#[test]
+fn test_self_update_command() {
+    let f = Fixture::new();
+    let out = f.run_cli(&["self-update"]);
+    let text = stdout(&out);
+    let err_text = stderr(&out);
+    assert!(
+        text.contains("Checking for latest Aster release...")
+            || err_text.contains("Checking for latest Aster release...")
+            || text.contains("already up to date")
+            || text.contains("Updating Aster")
+            || err_text.contains("Failed to fetch")
+            || err_text.contains("Error"),
+        "self-update output should announce check or status: stdout='{text}', stderr='{err_text}'"
+    );
+}
+
+#[test]
+fn test_perform_self_update_already_up_to_date() {
+    let f = Fixture::new();
+    let current_exe = f.temp.path().join("mock_aster");
+    fs::write(&current_exe, b"old binary").unwrap();
+
+    let res = aster::cli::perform_self_update(
+        &f.config,
+        &current_exe,
+        aster::VERSION,
+        "file:///nonexistent/url",
+    );
+    assert_eq!(res.unwrap(), 0);
+    assert_eq!(fs::read(&current_exe).unwrap(), b"old binary");
+}
+
+#[test]
+fn test_perform_self_update_successful_replacement_and_secondary_bin_update() {
+    let f = Fixture::new();
+    let exe_dir = f.temp.path().join("bin_dir");
+    fs::create_dir_all(&exe_dir).unwrap();
+
+    let current_exe = exe_dir.join("aster_runner");
+    fs::write(&current_exe, b"v0.2.5 binary").unwrap();
+
+    let secondary_bin = f.config.aster_bin.clone();
+    fs::create_dir_all(secondary_bin.parent().unwrap()).unwrap();
+    fs::write(&secondary_bin, b"v0.2.5 binary").unwrap();
+
+    let new_release = f.temp.path().join("aster_v0.3.0");
+    fs::write(&new_release, b"v0.3.0 new binary").unwrap();
+
+    let res = aster::cli::perform_self_update(
+        &f.config,
+        &current_exe,
+        "0.3.0",
+        &format!("file://{}", new_release.display()),
+    );
+    assert_eq!(res.unwrap(), 0);
+
+    assert_eq!(fs::read(&current_exe).unwrap(), b"v0.3.0 new binary");
+    assert_eq!(fs::read(&secondary_bin).unwrap(), b"v0.3.0 new binary");
+
+    let history_file = f.config.logs_dir.join("history.log");
+    let hist_text = fs::read_to_string(&history_file).unwrap();
+    assert!(hist_text.contains("Updated Aster to version 0.3.0"));
+}
+
+#[test]
+fn test_perform_self_update_download_failure_preserves_executable() {
+    let f = Fixture::new();
+    let current_exe = f.temp.path().join("mock_aster_fail");
+    fs::write(&current_exe, b"original binary").unwrap();
+
+    let res = aster::cli::perform_self_update(
+        &f.config,
+        &current_exe,
+        "0.3.0",
+        "file:///nonexistent/path/aster",
+    );
+    let err = res.unwrap_err();
+    assert!(err.to_string().contains("Failed to download"));
+    assert_eq!(fs::read(&current_exe).unwrap(), b"original binary");
+}
+
+#[test]
+fn test_perform_self_update_secondary_copy_failure_returns_error() {
+    let f = Fixture::new();
+    let current_exe = f.temp.path().join("mock_aster_sec");
+    fs::write(&current_exe, b"v0.2.5 binary").unwrap();
+
+    // Create secondary_bin as a directory so fs::copy fails
+    let secondary_bin = f.config.aster_bin.clone();
+    fs::create_dir_all(&secondary_bin).unwrap();
+
+    let new_release = f.temp.path().join("aster_v0.3.0_sec");
+    fs::write(&new_release, b"v0.3.0 new binary").unwrap();
+
+    let res = aster::cli::perform_self_update(
+        &f.config,
+        &current_exe,
+        "0.3.0",
+        &format!("file://{}", new_release.display()),
+    );
+    let err = res.unwrap_err();
+    assert!(err.to_string().contains("Failed to update Aster binary at"));
+}

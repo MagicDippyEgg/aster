@@ -8,7 +8,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-pub const USER_AGENT: &str = "Aster-PackageManager/0.2.4";
+pub const USER_AGENT: &str = concat!("Aster-PackageManager/", env!("CARGO_PKG_VERSION"));
 
 pub fn default_aster_home() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
@@ -83,12 +83,27 @@ pub fn fetch_url_to_file(
     headers: Option<&HashMap<String, String>>,
     timeout: u64,
 ) -> Result<()> {
-    let data = fetch_url(url, headers, timeout)?;
-    if let Some(parent) = dest_path.parent() {
-        fs::create_dir_all(parent)?;
+    if url.starts_with("file://") {
+        let src_path = PathBuf::from(url.trim_start_matches("file://"));
+        if !src_path.exists() {
+            return Err(AsterError::NotFound(format!(
+                "Local file not found: {}",
+                src_path.display()
+            )));
+        }
+        if let Some(parent) = dest_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&src_path, dest_path)?;
+        Ok(())
+    } else {
+        let data = fetch_url(url, headers, timeout)?;
+        if let Some(parent) = dest_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(dest_path, data)?;
+        Ok(())
     }
-    fs::write(dest_path, data)?;
-    Ok(())
 }
 
 /// Downloads content from a URL directly to `dest_path`, reporting progress via callback.
