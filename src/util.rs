@@ -1,7 +1,7 @@
 //! Small helpers shared across Aster modules.
 
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Renders a JSON value the way Python's `str()` would for common cases.
 pub fn py_str(v: &Value) -> String {
@@ -127,8 +127,28 @@ pub fn find_file(root: &Path, name: &str) -> Option<PathBuf> {
     walk(root, name)
 }
 
-/// Returns current UTC timestamp in "YYYY-MM-DD HH:MM:SS" format.
+/// Returns current system local timestamp in "YYYY-MM-DD HH:MM:SS" format.
 pub fn current_timestamp() -> String {
+    #[cfg(unix)]
+    {
+        unsafe {
+            let now = libc::time(std::ptr::null_mut());
+            let mut tm = std::mem::MaybeUninit::<libc::tm>::uninit();
+            if !libc::localtime_r(&now, tm.as_mut_ptr()).is_null() {
+                let tm = tm.assume_init();
+                return format!(
+                    "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                    tm.tm_year + 1900,
+                    tm.tm_mon + 1,
+                    tm.tm_mday,
+                    tm.tm_hour,
+                    tm.tm_min,
+                    tm.tm_sec
+                );
+            }
+        }
+    }
+
     let now = std::time::SystemTime::now();
     let dur = now
         .duration_since(std::time::UNIX_EPOCH)
@@ -154,6 +174,39 @@ pub fn current_timestamp() -> String {
     format!("{y:04}-{m:02}-{d:02} {hours:02}:{mins:02}:{s:02}")
 }
 
+/// Normalizes path components lexically without requiring the target to exist.
+pub fn normalize_path_lexically(path: &Path) -> PathBuf {
+    let is_absolute = path.is_absolute();
+    let mut normalized = PathBuf::new();
+    let mut normal_depth = 0usize;
+
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::Normal(part) => {
+                normalized.push(part);
+                normal_depth += 1;
+            }
+            Component::ParentDir => {
+                if normal_depth > 0 {
+                    normalized.pop();
+                    normal_depth -= 1;
+                } else if !is_absolute {
+                    normalized.push("..");
+                }
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        normalized
+    }
+}
+
 /// Locates `name` in a `:`-separated PATH, mirroring Python's `shutil.which`.
 pub fn which(name: &str, path: Option<&str>) -> Option<PathBuf> {
     let path = match path {
@@ -170,4 +223,26 @@ pub fn which(name: &str, path: Option<&str>) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod path_normalization_tests {
+    use super::normalize_path_lexically;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn normalizes_parent_components_without_filesystem_access() {
+        assert_eq!(
+            normalize_path_lexically(Path::new("/tmp/aster/bin/../packages/pkg/missing")),
+            PathBuf::from("/tmp/aster/packages/pkg/missing")
+        );
+        assert_eq!(
+            normalize_path_lexically(Path::new("bin/../packages/pkg/missing")),
+            PathBuf::from("packages/pkg/missing")
+        );
+        assert_eq!(
+            normalize_path_lexically(Path::new("../../pkg/missing")),
+            PathBuf::from("../../pkg/missing")
+        );
+    }
 }
