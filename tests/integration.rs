@@ -663,6 +663,25 @@ fn test_repo_info_command() {
     let out_err = f.run_cli(&["repo", "info", "nonexistent-repo"]);
     assert_eq!(code(&out_err), 1);
     assert!(stdout(&out_err).contains("Repository 'nonexistent-repo' not found."));
+
+    // Test uncached repo with invalid URL/path propagates error
+    let invalid_dir = f.temp.path().join("nonexistent_path");
+    let repos_invalid = json!({
+        "schema_version": 1,
+        "repositories": {
+            "invalid-repo": {"name": "invalid-repo", "url": invalid_dir.to_string_lossy(), "priority": 100}
+        }
+    });
+    f.config
+        .save_json_atomic(&f.config.repositories_json, &repos_invalid)
+        .unwrap();
+
+    let out_fetch_err = f.run_cli(&["repo", "info", "invalid-repo"]);
+    assert_eq!(code(&out_fetch_err), 1);
+    assert!(
+        stderr(&out_fetch_err).contains("Local catalogue index file not found")
+            || stderr(&out_fetch_err).contains("Error")
+    );
 }
 
 #[test]

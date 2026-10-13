@@ -948,53 +948,49 @@ fn repo_info(
     let prio = display_priority(repo_info);
 
     let cached_index = match catalogue.get_cached_index(name)? {
-        Some(idx) => Some(idx),
-        None => catalogue.update_repository(name).ok(),
+        Some(idx) => idx,
+        None => catalogue.update_repository(name)?,
     };
 
     println!("Repository: {name}");
     println!("  URL:            {url}");
     println!("  Priority:       {prio}");
 
-    if let Some(idx) = cached_index {
-        let schema_version = idx
-            .get("schema_version")
-            .and_then(|v| v.as_i64().or_else(|| v.as_u64().map(|n| n as i64)))
-            .unwrap_or(1);
-        println!("  Schema Version: {schema_version}");
+    let schema_version = cached_index
+        .get("schema_version")
+        .and_then(|v| v.as_i64().or_else(|| v.as_u64().map(|n| n as i64)))
+        .unwrap_or(1);
+    println!("  Schema Version: {schema_version}");
 
-        let package_count = idx
-            .get("packages")
-            .and_then(|v| v.as_object())
-            .map(|m| m.len())
-            .unwrap_or(0);
-        println!("  Packages:       {package_count}");
+    let package_count = cached_index
+        .get("packages")
+        .and_then(|v| v.as_object())
+        .map(|m| m.len())
+        .unwrap_or(0);
+    println!("  Packages:       {package_count}");
 
-        let metadata = idx.get("metadata").and_then(|v| v.as_object());
-        let desc = metadata
-            .and_then(|m| m.get("description"))
-            .or_else(|| idx.get("description"))
-            .map(py_str)
-            .unwrap_or_else(|| "N/A".to_string());
-        println!("  Description:    {desc}");
+    let metadata = cached_index.get("metadata").and_then(|v| v.as_object());
+    let desc = metadata
+        .and_then(|m| m.get("description"))
+        .or_else(|| cached_index.get("description"))
+        .map(py_str)
+        .unwrap_or_else(|| "N/A".to_string());
+    println!("  Description:    {desc}");
 
-        let maintainer = metadata
-            .and_then(|m| m.get("maintainer"))
-            .or_else(|| idx.get("maintainer"))
-            .map(py_str);
-        if let Some(m) = maintainer {
-            println!("  Maintainer:     {m}");
-        }
+    let maintainer = metadata
+        .and_then(|m| m.get("maintainer"))
+        .or_else(|| cached_index.get("maintainer"))
+        .map(py_str);
+    if let Some(m) = maintainer {
+        println!("  Maintainer:     {m}");
+    }
 
-        let homepage = metadata
-            .and_then(|m| m.get("homepage"))
-            .or_else(|| idx.get("homepage"))
-            .map(py_str);
-        if let Some(h) = homepage {
-            println!("  Homepage:       {h}");
-        }
-    } else {
-        println!("  Status:         Not cached");
+    let homepage = metadata
+        .and_then(|m| m.get("homepage"))
+        .or_else(|| cached_index.get("homepage"))
+        .map(py_str);
+    if let Some(h) = homepage {
+        println!("  Homepage:       {h}");
     }
 
     Ok(0)
