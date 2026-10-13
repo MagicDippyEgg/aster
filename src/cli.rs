@@ -101,6 +101,8 @@ enum RepoCommand {
     List,
     /// Update cached package indexes
     Update,
+    /// Show information about a package repository
+    Info { name: String },
     /// Add a package repository
     Add {
         name: String,
@@ -422,6 +424,7 @@ fn completions(shell: clap_complete::Shell) -> crate::error::Result<i32> {
              complete -c aster -n \"__fish_aster_using_subcommand remove\" -f -a \"(aster _complete installed 2>/dev/null)\"\n\
              complete -c aster -n \"__fish_aster_using_subcommand verify\" -f -a \"(aster _complete installed 2>/dev/null)\"\n\
              complete -c aster -n \"__fish_aster_using_subcommand upgrade\" -f -a \"(aster _complete installed 2>/dev/null)\"\n\
+             complete -c aster -n \"__fish_aster_using_subcommand repo; and __fish_seen_subcommand_from info\" -f -a \"(aster _complete repos 2>/dev/null)\"\n\
              complete -c aster -n \"__fish_aster_using_subcommand repo; and __fish_seen_subcommand_from remove\" -f -a \"(aster _complete repos 2>/dev/null)\"\n\
              complete -c aster -n \"__fish_aster_using_subcommand repo; and __fish_seen_subcommand_from set-priority\" -f -a \"(aster _complete repos 2>/dev/null)\""
         );
@@ -924,7 +927,77 @@ fn repo(
             println!("Catalogue update complete.");
             Ok(0)
         }
+        Some(RepoCommand::Info { name }) => repo_info(catalogue, &repos, &name),
     }
+}
+
+fn repo_info(
+    catalogue: &CatalogueManager,
+    repos: &Map<String, Value>,
+    name: &str,
+) -> crate::error::Result<i32> {
+    let repo_info = match repos.get(name) {
+        Some(info) => info,
+        None => {
+            println!("Repository '{name}' not found.");
+            return Ok(1);
+        }
+    };
+
+    let url = repo_info.get("url").map(py_str).unwrap_or_default();
+    let prio = display_priority(repo_info);
+
+    let cached_index = match catalogue.get_cached_index(name)? {
+        Some(idx) => Some(idx),
+        None => catalogue.update_repository(name).ok(),
+    };
+
+    println!("Repository: {name}");
+    println!("  URL:            {url}");
+    println!("  Priority:       {prio}");
+
+    if let Some(idx) = cached_index {
+        let schema_version = idx
+            .get("schema_version")
+            .and_then(|v| v.as_i64().or_else(|| v.as_u64().map(|n| n as i64)))
+            .unwrap_or(1);
+        println!("  Schema Version: {schema_version}");
+
+        let package_count = idx
+            .get("packages")
+            .and_then(|v| v.as_object())
+            .map(|m| m.len())
+            .unwrap_or(0);
+        println!("  Packages:       {package_count}");
+
+        let metadata = idx.get("metadata").and_then(|v| v.as_object());
+        let desc = metadata
+            .and_then(|m| m.get("description"))
+            .or_else(|| idx.get("description"))
+            .map(py_str)
+            .unwrap_or_else(|| "N/A".to_string());
+        println!("  Description:    {desc}");
+
+        let maintainer = metadata
+            .and_then(|m| m.get("maintainer"))
+            .or_else(|| idx.get("maintainer"))
+            .map(py_str);
+        if let Some(m) = maintainer {
+            println!("  Maintainer:     {m}");
+        }
+
+        let homepage = metadata
+            .and_then(|m| m.get("homepage"))
+            .or_else(|| idx.get("homepage"))
+            .map(py_str);
+        if let Some(h) = homepage {
+            println!("  Homepage:       {h}");
+        }
+    } else {
+        println!("  Status:         Not cached");
+    }
+
+    Ok(0)
 }
 
 fn filter_hidden_subcommands(cmd: clap::Command) -> clap::Command {
