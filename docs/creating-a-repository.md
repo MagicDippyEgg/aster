@@ -7,23 +7,27 @@ This guide provides a complete, in-depth reference for creating, structuring, an
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [Repository Directory Layout](#repository-directory-layout)
-3. [The Repository Index (`index.json`)](#1-the-repository-index-indexjson)
-4. [Package Definition Schemas](#2-package-definition-schemas)
+2. [Repository Types](#repository-types)
+   - [1. Recipe-Only Repositories](#1-recipe-only-repositories)
+   - [2. Fully Hosted Repositories](#2-fully-hosted-repositories)
+   - [3. Hybrid Repositories](#3-hybrid-repositories)
+3. [Repository Directory Layout](#repository-directory-layout)
+4. [The Repository Index (`index.json`)](#1-the-repository-index-indexjson)
+5. [Package Definition Schemas](#2-package-definition-schemas)
    - [Common Core Fields](#common-core-fields)
    - [Binary Package Definitions (`"type": "binary"`)](#binary-package-definitions-type-binary)
    - [Source Package Definitions (`"type": "source"`)](#source-package-definitions-type-source)
-5. [Source Acquisition Types](#3-source-acquisition-types)
+6. [Source Acquisition Types](#3-source-acquisition-types)
    - [Git Repositories](#git-repositories)
    - [Source Archives and HTTP Downloads](#source-archives-and-http-downloads)
-6. [Build System Configurations](#4-build-system-configurations)
+7. [Build System Configurations](#4-build-system-configurations)
    - [Cargo (Rust)](#cargo-rust)
    - [CMake](#cmake)
    - [Make](#make)
    - [Custom Scripted Build Steps](#custom-scripted-build-steps)
-7. [Dependencies & Executable Resolution](#5-dependencies--executable-resolution)
-8. [Hosting a Repository](#6-hosting-a-repository)
-9. [Adding and Managing Repositories in Aster](#7-adding-and-managing-repositories-in-aster)
+8. [Dependencies & Executable Resolution](#5-dependencies--executable-resolution)
+9. [Hosting a Repository](#6-hosting-a-repository)
+10. [Adding and Managing Repositories in Aster](#7-adding-and-managing-repositories-in-aster)
 
 ---
 
@@ -34,6 +38,99 @@ An Aster repository is an HTTP/HTTPS web service or local directory tree contain
 2. `packages/`: A subdirectory containing individual JSON package definitions (`<package-id>.json`).
 
 When a user runs `aster repo update`, Aster fetches and caches `index.json`. When installing a package, Aster retrieves that package's JSON definition file on demand.
+
+---
+
+## Repository Types
+
+Aster package repositories can be designed according to three distinct architectural models based on hosting requirements, bandwidth, and control:
+
+### 1. Recipe-Only Repositories
+
+In a **Recipe-only repository** (such as the default repository), the host only serves repository catalog metadata (`index.json`) and JSON package recipes (in `packages/`). The recipes specify external upstream URLs where precompiled binary releases or source code tarballs/git repositories reside.
+
+- **How it works:** Package JSON files point directly to upstream URLs (e.g., GitHub Releases, project Git repositories, or vendor tarballs).
+- **Advantages:** Lightweight repository footprint, easy to maintain, and requires no storage or bandwidth for mirroring upstream files.
+
+#### Example Definition Excerpt (Upstream Binary Download)
+*(Excerpt showing the `downloads` section of a binary package definition pointing directly to upstream release assets)*
+
+```json
+{
+    "downloads": {
+        "linux-x86_64": {
+            "url": "https://github.com/sharkdp/bat/releases/download/v0.26.1/bat-v0.26.1-x86_64-unknown-linux-musl.tar.gz",
+            "sha256": "0dcd8ac79732c0d5b136f11f4ee00e581440e16a44eab5b3105b611bbf2cf191"
+        }
+    }
+}
+```
+
+---
+
+### 2. Fully Hosted Repositories
+
+A **Fully Hosted repository** hosts repository metadata, package recipes, precompiled binary archives, and source code archives/repositories together on the same server or internal storage infrastructure.
+
+- **How it works:** The repository web server hosts precompiled binary tarballs or source code archives (and/or self-hosted Git repositories) directly alongside `index.json` and `packages/` (e.g. under `binaries/` or `sources/`). All `url` references in package definitions point to files or Git repositories hosted on the repository server or internal network.
+- **Advantages:** Complete control over distribution, immunity to broken upstream download links, and potential for offline, air-gapped, or internal enterprise local network use (note: source package builds may still require network access unless build toolchains and dependencies are pre-installed or vendored).
+
+#### Example Directory Structure
+```text
+my-hosted-repo/
+├── index.json
+├── packages/
+│   ├── mytool-bin.json
+│   └── mytool-src.json
+├── binaries/
+│   └── mytool-v1.0.0-linux-x86_64.tar.gz
+└── sources/
+    └── mytool-v1.0.0-src.tar.gz
+```
+
+#### Fully Hosted Binary Package Example (`packages/mytool-bin.json`)
+```json
+{
+    "schema_version": 1,
+    "id": "mytool-bin",
+    "name": "mytool",
+    "version": "1.0.0",
+    "type": "binary",
+    "downloads": {
+        "linux-x86_64": {
+            "url": "https://repo.internal.net/binaries/mytool-v1.0.0-linux-x86_64.tar.gz"
+        }
+    }
+}
+```
+
+#### Fully Hosted Source Package Example (`packages/mytool-src.json`)
+```json
+{
+    "schema_version": 1,
+    "id": "mytool-src",
+    "name": "mytool",
+    "version": "1.0.0",
+    "type": "source",
+    "source": {
+        "type": "tar.gz",
+        "url": "https://repo.internal.net/sources/mytool-v1.0.0-src.tar.gz"
+    },
+    "build": {
+        "system": "cargo",
+        "release": true
+    }
+}
+```
+
+---
+
+### 3. Hybrid Repositories
+
+A **Hybrid repository** hosts some files directly on the repository server while downloading others from upstream sources.
+
+- **How it works:** For instance, a repository might self-host precompiled binary release archives on its server to ensure fast, reliable binary installs, while configuring source packages to clone directly from upstream Git repositories.
+- **Advantages:** Flexibility to choose what to mirror based on available bandwidth, reliability, storage, and package-specific requirements.
 
 ---
 
