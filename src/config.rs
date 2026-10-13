@@ -8,7 +8,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-pub const USER_AGENT: &str = "Aster-PackageManager/0.2.4";
+pub const USER_AGENT: &str = concat!("Aster-PackageManager/", env!("CARGO_PKG_VERSION"));
 
 pub fn default_aster_home() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();

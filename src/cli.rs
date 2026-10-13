@@ -67,6 +67,9 @@ enum Commands {
     },
     /// Refresh package indexes and show available updates
     Update,
+    /// Update Aster package manager to the latest release
+    #[command(name = "self-update", alias = "selfupdate")]
+    SelfUpdate,
     /// Upgrade installed packages
     Upgrade {
         #[arg(default_value = "")]
@@ -186,6 +189,128 @@ pub fn run(args: Vec<String>) -> i32 {
     }
 }
 
+fn get_latest_aster_release_tag() -> crate::error::Result<String> {
+    let api_url = "https://api.github.com/repos/MagicDippyEgg/aster/releases/latest";
+    if let Ok(bytes) = crate::config::fetch_url(api_url, None, 15) {
+        if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
+            if let Some(tag) = val.get("tag_name").and_then(|v| v.as_str()) {
+                if !tag.is_empty() {
+                    return Ok(tag.to_string());
+                }
+            }
+        }
+    }
+
+    // Fallback: check redirect URL of releases/latest
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| crate::error::AsterError::Http(e.to_string()))?;
+
+    let mut req = client.get("https://github.com/MagicDippyEgg/aster/releases/latest");
+    let ua = reqwest::header::HeaderValue::from_str(crate::config::USER_AGENT)
+        .map_err(|e| crate::error::AsterError::Http(e.to_string()))?;
+    req = req.header(reqwest::header::USER_AGENT, ua);
+
+    let resp = req
+        .send()
+        .map_err(|e| crate::error::AsterError::Http(e.to_string()))?;
+    let final_url = resp.url().as_str();
+
+    if let Some(idx) = final_url.find("/tag/") {
+        let tag = &final_url[idx + 5..];
+        let tag = tag.trim_matches('/');
+        if !tag.is_empty() {
+            return Ok(tag.to_string());
+        }
+    }
+
+    Err(crate::error::AsterError::Runtime(
+        "Failed to fetch latest Aster release tag from GitHub.".to_string(),
+    ))
+}
+
+fn self_update(config: &AsterConfig) -> crate::error::Result<i32> {
+    println!("Checking for latest Aster release...");
+    let tag_name = get_latest_aster_release_tag()?;
+    let latest_version = tag_name.trim_start_matches('v').to_string();
+
+    let cmp = compare_versions(crate::VERSION, &latest_version);
+    if cmp >= 0 {
+        println!("Aster is already up to date ({latest_version}).");
+        return Ok(0);
+    }
+
+    println!(
+        "Updating Aster from {} to {}...",
+        crate::VERSION,
+        latest_version
+    );
+
+    let download_url =
+        format!("https://github.com/MagicDippyEgg/aster/releases/download/{tag_name}/aster");
+
+    let current_exe = std::env::current_exe().map_err(|e| {
+        crate::error::AsterError::Runtime(format!(
+            "Failed to determine current executable path: {e}"
+        ))
+    })?;
+
+    let target_dir = current_exe
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+
+    let pid = std::process::id();
+    let temp_exe = target_dir.join(format!(".aster_self_update_{pid}"));
+
+    let mut fetch_res = crate::config::fetch_url_to_file(&download_url, &temp_exe, None, 60);
+    if fetch_res.is_err() && tag_name != latest_version {
+        let alt_url = format!(
+            "https://github.com/MagicDippyEgg/aster/releases/download/{latest_version}/aster"
+        );
+        fetch_res = crate::config::fetch_url_to_file(&alt_url, &temp_exe, None, 60);
+    }
+
+    if let Err(e) = fetch_res {
+        if temp_exe.exists() {
+            let _ = fs::remove_file(&temp_exe);
+        }
+        return Err(crate::error::AsterError::Runtime(format!(
+            "Failed to download updated Aster binary from {download_url}: {e}"
+        )));
+    }
+
+    crate::util::set_mode(&temp_exe, 0o755)?;
+
+    if let Err(e) = fs::rename(&temp_exe, &current_exe) {
+        if temp_exe.exists() {
+            let _ = fs::remove_file(&temp_exe);
+        }
+        return Err(crate::error::AsterError::Runtime(format!(
+            "Failed to replace executable at '{}': {e}",
+            current_exe.display()
+        )));
+    }
+
+    if config.aster_bin.exists() {
+        let same_path = match (
+            fs::canonicalize(&config.aster_bin),
+            fs::canonicalize(&current_exe),
+        ) {
+            (Ok(p1), Ok(p2)) => p1 == p2,
+            _ => config.aster_bin == current_exe,
+        };
+        if !same_path {
+            let _ = fs::copy(&current_exe, &config.aster_bin);
+            let _ = crate::util::set_mode(&config.aster_bin, 0o755);
+        }
+    }
+
+    config.log_history(&format!("Updated Aster to version {latest_version}"));
+    println!("Successfully updated Aster to version {latest_version}.");
+    Ok(0)
+}
+
 fn dispatch(
     command: Commands,
     config: &AsterConfig,
@@ -220,6 +345,7 @@ fn dispatch(
         Commands::Verify { package } => verify(registry, &package),
         Commands::History { limit } => history(config, limit),
         Commands::Update => update(registry, catalogue),
+        Commands::SelfUpdate => self_update(config),
         Commands::Upgrade { package } => upgrade(registry, catalogue, installer, &package),
         Commands::Repo { command } => repo(config, catalogue, command),
         Commands::Config { command } => config_cmd(config, command),

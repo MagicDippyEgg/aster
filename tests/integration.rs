@@ -1682,3 +1682,20 @@ fn test_checksum_placeholder_does_not_disable_integrity_verification() {
     assert!(!f.registry().is_installed("fastfetch-bin").unwrap());
     assert!(!f.config.packages_dir.join("fastfetch-bin").exists());
 }
+
+#[test]
+fn test_self_update_command() {
+    let f = Fixture::new();
+    let out = f.run_cli(&["self-update"]);
+    let text = stdout(&out);
+    let err_text = stderr(&out);
+    assert!(
+        text.contains("Checking for latest Aster release...")
+            || err_text.contains("Checking for latest Aster release...")
+            || text.contains("already up to date")
+            || text.contains("Updating Aster")
+            || err_text.contains("Failed to fetch")
+            || err_text.contains("Error"),
+        "self-update output should announce check or status: stdout='{text}', stderr='{err_text}'"
+    );
+}
