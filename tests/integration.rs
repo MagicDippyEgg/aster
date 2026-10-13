@@ -1082,3 +1082,603 @@ fn test_install_verbose_flags() {
     let stdout_verb = stdout(&out_verbose);
     assert!(stdout_verb.contains("$ mkdir -p staging_bin"));
 }
+
+#[test]
+fn test_history_limit_and_local_timestamp() {
+    let f = Fixture::new();
+
+    f.config.log_history("Entry 1");
+    f.config.log_history("Entry 2");
+    f.config.log_history("Entry 3");
+
+    let out_all = f.run_cli(&["history"]);
+    assert_eq!(code(&out_all), 0);
+    let text_all = stdout(&out_all);
+    assert!(text_all.contains("Entry 1"));
+    assert!(text_all.contains("Entry 2"));
+    assert!(text_all.contains("Entry 3"));
+
+    let out_limit = f.run_cli(&["history", "--limit", "2"]);
+    assert_eq!(code(&out_limit), 0);
+    let text_limit = stdout(&out_limit);
+    assert!(!text_limit.contains("Entry 1"));
+    assert!(text_limit.contains("Entry 2"));
+    assert!(text_limit.contains("Entry 3"));
+
+    let re = regex::Regex::new(r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] Entry 3").unwrap();
+    assert!(re.is_match(&text_limit));
+}
+
+#[test]
+fn test_install_dry_run() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+
+    let out = f.run_cli(&["install", "--dry-run", "app-with-dep"]);
+    assert_eq!(code(&out), 0);
+    let stdout_text = stdout(&out);
+    assert!(stdout_text.contains("Dry run: Installation plan for 'app-with-dep':"));
+    assert!(stdout_text.contains("dep-lib"));
+    assert!(stdout_text.contains("app-with-dep"));
+
+    // Ensure package was NOT installed
+    assert_eq!(code(&f.run_cli(&["installed", "app-with-dep"])), 1);
+}
+
+#[test]
+fn test_verify_intact_and_broken() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+
+    assert_eq!(code(&f.run_cli(&["verify"])), 0);
+
+    assert_eq!(code(&f.run_cli(&["install", "fastfetch-bin"])), 0);
+
+    // Verify all intact
+    let out_verify = f.run_cli(&["verify"]);
+    assert_eq!(code(&out_verify), 0);
+    assert!(stdout(&out_verify).contains("All installed packages are intact."));
+
+    let out_single = f.run_cli(&["verify", "fastfetch-bin"]);
+    assert_eq!(code(&out_single), 0);
+    assert!(stdout(&out_single).contains("Package 'fastfetch-bin' is intact."));
+
+    // Add a broken symlink inside package directory recorded as installed_file
+    let pkg_dir = f.config.packages_dir.join("fastfetch-bin");
+    let broken_link = pkg_dir.join("broken_file_link");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(pkg_dir.join("nonexistent_target"), &broken_link).unwrap();
+
+    let mut reg = f.registry().load_registry().unwrap();
+    if let Some(serde_json::Value::Object(map)) = reg.get_mut("installed") {
+        if let Some(serde_json::Value::Object(pkg_map)) = map.get_mut("fastfetch-bin") {
+            if let Some(serde_json::Value::Array(arr)) = pkg_map.get_mut("installed_files") {
+                arr.push(serde_json::json!("broken_file_link"));
+                arr.push(serde_json::json!("../outside"));
+            }
+        }
+    }
+    f.registry().save_registry(&reg).unwrap();
+
+    #[cfg(unix)]
+    {
+        let out_broken_sym = f.run_cli(&["verify", "fastfetch-bin"]);
+        assert_ne!(code(&out_broken_sym), 0);
+        assert!(stdout(&out_broken_sym).contains("Broken recorded symlink: broken_file_link"));
+        assert!(stdout(&out_broken_sym).contains("Unsafe recorded file path: ../outside"));
+    }
+
+    // Break symlink
+    let link_path = f.config.bin_dir.join("fastfetch");
+    fs::remove_file(&link_path).unwrap();
+
+    let out_broken = f.run_cli(&["verify", "fastfetch-bin"]);
+    assert_ne!(code(&out_broken), 0);
+    assert!(stdout(&out_broken).contains("Missing command symlink"));
+
+    let out_all_failed = f.run_cli(&["verify"]);
+    assert_ne!(code(&out_all_failed), 0);
+}
+
+#[test]
+fn test_safe_upgrade_and_rollback() {
+    let f = Fixture::new();
+
+    // Create repo with v1 of pkg
+    let repo_dir = f.temp.path().join("upg_repo");
+    fs::create_dir_all(repo_dir.join("packages")).unwrap();
+
+    let v1_archive = f.temp.path().join("pkg-1.0.0.tar.gz");
+    make_tar_gz(&v1_archive, &[("bin/mypkg", b"#!/bin/sh\necho v1", 0o755)]);
+
+    write_json(
+        &repo_dir.join("index.json"),
+        &json!({
+            "schema_version": 1,
+            "packages": {
+                "mypkg": {"definition": "packages/mypkg.json", "type": "binary", "description": "My Pkg"}
+            }
+        }),
+    );
+    write_json(
+        &repo_dir.join("packages/mypkg.json"),
+        &json!({
+            "schema_version": 1,
+            "id": "mypkg",
+            "name": "mypkg",
+            "version": "1.0.0",
+            "type": "binary",
+            "downloads": {
+                "linux-x86_64": {"url": format!("file://{}", v1_archive.display())},
+                "linux-aarch64": {"url": format!("file://{}", v1_archive.display())}
+            }
+        }),
+    );
+
+    let repos = json!({
+        "schema_version": 1,
+        "repositories": {
+            "default": {"name": "default", "url": repo_dir.to_string_lossy(), "priority": 100}
+        }
+    });
+    f.config
+        .save_json_atomic(&f.config.repositories_json, &repos)
+        .unwrap();
+
+    f.catalogue().update_all().unwrap();
+    f.installer().install("mypkg", true, false).unwrap();
+
+    let bin_link = f.config.bin_dir.join("mypkg");
+    assert!(bin_link.exists());
+
+    // Update repo to v2 with a NON-EXISTENT archive so installation fails
+    write_json(
+        &repo_dir.join("index.json"),
+        &json!({
+            "schema_version": 1,
+            "packages": {
+                "mypkg": {"definition": "packages/mypkg.json", "type": "binary", "description": "My Pkg v2"}
+            }
+        }),
+    );
+    write_json(
+        &repo_dir.join("packages/mypkg.json"),
+        &json!({
+            "schema_version": 1,
+            "id": "mypkg",
+            "name": "mypkg",
+            "version": "2.0.0",
+            "type": "binary",
+            "downloads": {
+                "linux-x86_64": {"url": "file:///nonexistent/path/pkg-2.0.0.tar.gz"},
+                "linux-aarch64": {"url": "file:///nonexistent/path/pkg-2.0.0.tar.gz"}
+            }
+        }),
+    );
+    f.catalogue().update_all().unwrap();
+
+    let err = f
+        .installer()
+        .upgrade_package("mypkg", true, false)
+        .unwrap_err();
+    assert!(err.to_string().contains("Upgrade failed"));
+
+    // Verify rollback restored v1.0.0
+    assert!(f.registry().is_installed("mypkg").unwrap());
+    let info = f
+        .registry()
+        .get_installed_package("mypkg")
+        .unwrap()
+        .unwrap();
+    assert_eq!(info["version"], "1.0.0");
+    assert!(bin_link.exists());
+    assert!(f.config.packages_dir.join("mypkg").exists());
+    assert!(!f.config.packages_dir.join("mypkg.upgrade_backup").exists());
+}
+
+#[test]
+fn test_upgrade_cancelled_build_steps_rollback() {
+    let f = Fixture::new();
+
+    let repo_dir = f.temp.path().join("cancel_repo");
+    fs::create_dir_all(repo_dir.join("packages")).unwrap();
+
+    let v1_archive = f.temp.path().join("steps-1.0.0.tar.gz");
+    make_tar_gz(&v1_archive, &[("myscript", b"#!/bin/sh\necho v1", 0o755)]);
+
+    write_json(
+        &repo_dir.join("index.json"),
+        &json!({
+            "schema_version": 1,
+            "packages": {
+                "stepspkg": {"definition": "packages/stepspkg.json", "type": "source", "description": "Steps Pkg"}
+            }
+        }),
+    );
+    write_json(
+        &repo_dir.join("packages/stepspkg.json"),
+        &json!({
+            "schema_version": 1,
+            "id": "stepspkg",
+            "name": "stepspkg",
+            "version": "1.0.0",
+            "type": "source",
+            "source": {"type": "tar.gz", "url": format!("file://{}", v1_archive.display())},
+            "build": {"steps": ["chmod +x myscript"]},
+            "executables": ["myscript"]
+        }),
+    );
+
+    let repos = json!({
+        "schema_version": 1,
+        "repositories": {
+            "default": {"name": "default", "url": repo_dir.to_string_lossy(), "priority": 100}
+        }
+    });
+    f.config
+        .save_json_atomic(&f.config.repositories_json, &repos)
+        .unwrap();
+
+    f.catalogue().update_all().unwrap();
+    f.installer().install("stepspkg", true, false).unwrap();
+
+    assert!(f.config.bin_dir.join("myscript").exists());
+
+    // Update repo to v2 with custom steps. Without auto_yes (auto_yes=false) and non-interactive stdin ("n"),
+    // execution prompt will be declined.
+    write_json(
+        &repo_dir.join("packages/stepspkg.json"),
+        &json!({
+            "schema_version": 1,
+            "id": "stepspkg",
+            "name": "stepspkg",
+            "version": "2.0.0",
+            "type": "source",
+            "source": {"type": "tar.gz", "url": format!("file://{}", v1_archive.display())},
+            "build": {"steps": ["echo v2"]},
+            "executables": ["myscript"]
+        }),
+    );
+    f.catalogue().update_all().unwrap();
+
+    let err = f
+        .installer()
+        .upgrade_package("stepspkg", false, false)
+        .unwrap_err();
+    assert!(err.to_string().contains("cancelled"));
+
+    // Verify rollback restored v1.0.0 and package remains installed and usable
+    assert!(f.registry().is_installed("stepspkg").unwrap());
+    let info = f
+        .registry()
+        .get_installed_package("stepspkg")
+        .unwrap()
+        .unwrap();
+    assert_eq!(info["version"], "1.0.0");
+    assert!(f.config.bin_dir.join("myscript").exists());
+}
+
+#[test]
+fn test_upgrade_binary_names_change_removes_stale_symlinks() {
+    let f = Fixture::new();
+
+    let repo_dir = f.temp.path().join("bin_change_repo");
+    fs::create_dir_all(repo_dir.join("packages")).unwrap();
+
+    let v1_archive = f.temp.path().join("rename-1.0.0.tar.gz");
+    make_tar_gz(&v1_archive, &[("bin/oldcmd", b"#!/bin/sh\necho v1", 0o755)]);
+
+    write_json(
+        &repo_dir.join("index.json"),
+        &json!({
+            "schema_version": 1,
+            "packages": {
+                "renamepkg": {"definition": "packages/renamepkg.json", "type": "binary", "description": "Rename Pkg"}
+            }
+        }),
+    );
+    write_json(
+        &repo_dir.join("packages/renamepkg.json"),
+        &json!({
+            "schema_version": 1,
+            "id": "renamepkg",
+            "name": "renamepkg",
+            "version": "1.0.0",
+            "type": "binary",
+            "downloads": {
+                "linux-x86_64": {"url": format!("file://{}", v1_archive.display())},
+                "linux-aarch64": {"url": format!("file://{}", v1_archive.display())}
+            }
+        }),
+    );
+
+    let repos = json!({
+        "schema_version": 1,
+        "repositories": {
+            "default": {"name": "default", "url": repo_dir.to_string_lossy(), "priority": 100}
+        }
+    });
+    f.config
+        .save_json_atomic(&f.config.repositories_json, &repos)
+        .unwrap();
+
+    f.catalogue().update_all().unwrap();
+    f.installer().install("renamepkg", true, false).unwrap();
+
+    let old_link = f.config.bin_dir.join("oldcmd");
+    assert!(old_link.exists());
+
+    // Update repo to v2 providing newcmd instead of oldcmd
+    let v2_archive = f.temp.path().join("rename-2.0.0.tar.gz");
+    make_tar_gz(&v2_archive, &[("bin/newcmd", b"#!/bin/sh\necho v2", 0o755)]);
+
+    write_json(
+        &repo_dir.join("packages/renamepkg.json"),
+        &json!({
+            "schema_version": 1,
+            "id": "renamepkg",
+            "name": "renamepkg",
+            "version": "2.0.0",
+            "type": "binary",
+            "downloads": {
+                "linux-x86_64": {"url": format!("file://{}", v2_archive.display())},
+                "linux-aarch64": {"url": format!("file://{}", v2_archive.display())}
+            }
+        }),
+    );
+    f.catalogue().update_all().unwrap();
+
+    f.installer()
+        .upgrade_package("renamepkg", true, false)
+        .unwrap();
+
+    let new_link = f.config.bin_dir.join("newcmd");
+    assert!(new_link.exists());
+    assert!(
+        !aster::util::exists_or_symlink(&old_link) && !old_link.is_symlink(),
+        "stale command link should have been removed"
+    );
+}
+
+#[test]
+fn test_upgrade_missing_package_directory_refuses_without_mutation() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+    assert_eq!(code(&f.run_cli(&["install", "fastfetch-bin"])), 0);
+
+    let info_before = f
+        .registry()
+        .get_installed_package("fastfetch-bin")
+        .unwrap()
+        .unwrap();
+    let pkg_dir = f.config.packages_dir.join("fastfetch-bin");
+    fs::remove_dir_all(&pkg_dir).unwrap();
+
+    let err = f
+        .installer()
+        .upgrade_package("fastfetch-bin", true, false)
+        .unwrap_err();
+    assert!(err.to_string().contains("Cannot safely upgrade"));
+    assert!(f.registry().is_installed("fastfetch-bin").unwrap());
+    let info_after = f
+        .registry()
+        .get_installed_package("fastfetch-bin")
+        .unwrap()
+        .unwrap();
+    assert_eq!(info_after["version"], info_before["version"]);
+    assert!(!f
+        .config
+        .packages_dir
+        .join("fastfetch-bin.upgrade_backup")
+        .exists());
+}
+
+#[test]
+fn test_upgrade_retry_with_existing_backup_errors() {
+    let f = Fixture::new();
+
+    let repo_dir = f.temp.path().join("retry_repo");
+    fs::create_dir_all(repo_dir.join("packages")).unwrap();
+
+    let v1_archive = f.temp.path().join("retry-1.0.0.tar.gz");
+    make_tar_gz(
+        &v1_archive,
+        &[("bin/retrypkg", b"#!/bin/sh\necho v1", 0o755)],
+    );
+
+    write_json(
+        &repo_dir.join("index.json"),
+        &json!({
+            "schema_version": 1,
+            "packages": {
+                "retrypkg": {"definition": "packages/retrypkg.json", "type": "binary", "description": "Retry Pkg"}
+            }
+        }),
+    );
+    write_json(
+        &repo_dir.join("packages/retrypkg.json"),
+        &json!({
+            "schema_version": 1,
+            "id": "retrypkg",
+            "name": "retrypkg",
+            "version": "1.0.0",
+            "type": "binary",
+            "downloads": {
+                "linux-x86_64": {"url": format!("file://{}", v1_archive.display())},
+                "linux-aarch64": {"url": format!("file://{}", v1_archive.display())}
+            }
+        }),
+    );
+
+    let repos = json!({
+        "schema_version": 1,
+        "repositories": {
+            "default": {"name": "default", "url": repo_dir.to_string_lossy(), "priority": 100}
+        }
+    });
+    f.config
+        .save_json_atomic(&f.config.repositories_json, &repos)
+        .unwrap();
+
+    f.catalogue().update_all().unwrap();
+    f.installer().install("retrypkg", true, false).unwrap();
+
+    // Manually create a recovery backup directory to simulate a previously preserved backup
+    let backup_dir = f.config.packages_dir.join("retrypkg.upgrade_backup");
+    fs::create_dir_all(&backup_dir).unwrap();
+    fs::write(backup_dir.join("preserved_file"), b"important").unwrap();
+
+    // Attempt upgrade, verify it refuses to overwrite the recovery backup
+    let err = f
+        .installer()
+        .upgrade_package("retrypkg", true, false)
+        .unwrap_err();
+    assert!(err.to_string().contains("recovery backup"));
+
+    // Verify backup was NOT deleted
+    assert!(backup_dir.join("preserved_file").exists());
+}
+
+#[test]
+fn test_make_install_failure_is_reported_and_not_registered() {
+    let f = Fixture::new();
+
+    let archive = f.temp.path().join("failing-make-install.tar.gz");
+    let makefile =
+        b"all:\n\t@echo build complete\ninstall:\n\t@echo deliberate failure >&2\n\t@false\n";
+    make_tar_gz(&archive, &[("Makefile", makefile, 0o644)]);
+
+    let pkg_def = json!({
+        "schema_version": 1,
+        "id": "failing-make-install",
+        "name": "Failing Make Install",
+        "version": "1.0.0",
+        "type": "source",
+        "source": {
+            "type": "tar.gz",
+            "url": format!("file://{}", archive.display())
+        },
+        "build": {"system": "make"}
+    });
+
+    let err = f
+        .installer()
+        .install_source_from(&pkg_def, true, false, "test")
+        .unwrap_err();
+    assert!(err.to_string().contains("Make install failed"));
+    assert!(!f.registry().is_installed("failing-make-install").unwrap());
+    assert!(!f.config.packages_dir.join("failing-make-install").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_verify_rejects_package_directory_symlink() {
+    let f = Fixture::new();
+    f.catalogue().update_all().unwrap();
+    f.installer().install("fastfetch-bin", true, false).unwrap();
+
+    let package_dir = f.config.packages_dir.join("fastfetch-bin");
+    let moved_dir = f.temp.path().join("moved-fastfetch-package");
+    fs::rename(&package_dir, &moved_dir).unwrap();
+    std::os::unix::fs::symlink(&moved_dir, &package_dir).unwrap();
+
+    let issues = f.registry().verify_package("fastfetch-bin").unwrap();
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.contains("not a real directory")),
+        "verification should flag a package directory replaced by a symlink; got: {issues:?}"
+    );
+}
+
+#[test]
+fn test_install_does_not_overwrite_unmanaged_command_file() {
+    let f = Fixture::new();
+    f.catalogue().update_all().unwrap();
+
+    let command_path = f.config.bin_dir.join("fastfetch");
+    fs::write(&command_path, b"user-owned command").unwrap();
+
+    let err = f
+        .installer()
+        .install("fastfetch-bin", true, false)
+        .unwrap_err();
+    assert!(err.to_string().contains("not owned by package"));
+    assert_eq!(fs::read(&command_path).unwrap(), b"user-owned command");
+    assert!(!f.registry().is_installed("fastfetch-bin").unwrap());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_remove_rejects_unsafe_command_metadata_without_deleting_external_symlink() {
+    let f = Fixture::new();
+    f.catalogue().update_all().unwrap();
+    f.installer().install("fastfetch-bin", true, false).unwrap();
+
+    let external_link = f.root.join("external-dangling-link");
+    std::os::unix::fs::symlink(f.root.join("missing-target"), &external_link).unwrap();
+
+    let mut registry = f.registry().load_registry().unwrap();
+    let installed = registry["installed"].as_object_mut().unwrap();
+    let package = installed
+        .get_mut("fastfetch-bin")
+        .unwrap()
+        .as_object_mut()
+        .unwrap();
+    package.insert(
+        "provided_binaries".to_string(),
+        json!(["../external-dangling-link"]),
+    );
+    f.registry().save_registry(&registry).unwrap();
+
+    let err = f.installer().remove("fastfetch-bin", true).unwrap_err();
+    assert!(err.to_string().contains("Invalid command name"));
+    assert!(external_link.is_symlink());
+    assert!(f.registry().is_installed("fastfetch-bin").unwrap());
+    assert!(f.config.bin_dir.join("fastfetch").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_build_env_ignores_symlinked_package_directories() {
+    let f = Fixture::new();
+    let external_prefix = f.temp.path().join("external-prefix");
+    fs::create_dir_all(external_prefix.join("bin")).unwrap();
+    fs::create_dir_all(external_prefix.join("include")).unwrap();
+
+    let package_link = f.config.packages_dir.join("external-package-link");
+    std::os::unix::fs::symlink(&external_prefix, &package_link).unwrap();
+
+    let env = aster::config::get_build_env(&f.config, None);
+    let package_link_text = package_link.to_string_lossy();
+    for variable in ["PATH", "CPATH", "LD_LIBRARY_PATH", "CMAKE_PREFIX_PATH"] {
+        if let Some(paths) = env.get(variable) {
+            assert!(
+                !paths.split(':').any(|path| path == package_link_text),
+                "{variable} should not include symlinked package directory {}",
+                package_link.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn test_checksum_placeholder_does_not_disable_integrity_verification() {
+    let f = Fixture::new();
+    f.catalogue().update_all().unwrap();
+    let mut definition = f
+        .catalogue()
+        .get_package_definition("fastfetch-bin", None)
+        .unwrap()
+        .unwrap();
+    let platform = aster::installer::get_platform_key();
+    definition["downloads"][platform.as_str()]["sha256"] = json!("EXPECTED_SHA256");
+
+    let err = f
+        .installer()
+        .install_binary_from(&definition, "default")
+        .unwrap_err();
+    assert!(err.to_string().contains("Integrity check failed"));
+    assert!(!f.registry().is_installed("fastfetch-bin").unwrap());
+    assert!(!f.config.packages_dir.join("fastfetch-bin").exists());
+}
