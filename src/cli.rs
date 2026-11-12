@@ -68,6 +68,8 @@ enum Commands {
     },
     /// Refresh package indexes and show available updates
     Update,
+    /// List installed packages with newer catalogue versions available
+    Outdated,
     /// Update Aster package manager to the latest release
     #[command(name = "self-update", alias = "selfupdate")]
     SelfUpdate,
@@ -368,6 +370,7 @@ fn dispatch(
         Commands::Verify { package } => verify(registry, &package),
         Commands::History { limit } => history(config, limit),
         Commands::Update => update(registry, catalogue),
+        Commands::Outdated => outdated(registry, catalogue),
         Commands::SelfUpdate => self_update(config),
         Commands::Upgrade { package } => upgrade(registry, catalogue, installer, &package),
         Commands::Repo { command } => repo(config, catalogue, command),
@@ -883,6 +886,91 @@ fn update(registry: &RegistryManager, catalogue: &CatalogueManager) -> crate::er
         println!("All installed packages are up to date.");
     }
     Ok(0)
+}
+
+/// Lists installed packages whose catalogue version is newer than the
+/// installed version. Does not refresh indexes (run `aster update` first).
+///
+/// Returns exit code 1 when at least one outdated package is found, so the
+/// command can be used as a CI/script guard.
+fn outdated(registry: &RegistryManager, catalogue: &CatalogueManager) -> crate::error::Result<i32> {
+    let installed = registry.list_installed()?;
+    if installed.is_empty() {
+        println!("No packages currently installed.");
+        return Ok(0);
+    }
+
+    let mut outdated_pkgs: Vec<(String, String, String, Option<String>)> = Vec::new();
+    for (pkg_id, inst_info) in installed.iter() {
+        let pkg_def = match catalogue.get_package_definition_with_source(pkg_id, None)? {
+            Some((def, repo)) => (def, Some(repo)),
+            None => continue,
+        };
+        let avail_ver = pkg_def.0.get("version").map(py_str).unwrap_or_default();
+        let inst_ver = inst_info.get("version").map(py_str).unwrap_or_default();
+        if compare_versions(&inst_ver, &avail_ver) < 0 {
+            outdated_pkgs.push((pkg_id.clone(), inst_ver, avail_ver, pkg_def.1));
+        }
+    }
+
+    if outdated_pkgs.is_empty() {
+        println!("All installed packages are up to date.");
+        return Ok(0);
+    }
+
+    let has_multiple_repos = catalogue.get_repositories()?.len() > 1;
+
+    let max_pkg_len = outdated_pkgs
+        .iter()
+        .map(|(id, _, _, _)| id.len())
+        .max()
+        .unwrap_or(10);
+    let pkg_id_width = std::cmp::max(20, max_pkg_len + 2);
+
+    let max_repo_len = outdated_pkgs
+        .iter()
+        .map(|(_, _, _, repo)| repo.as_ref().map(|r| r.len()).unwrap_or(7))
+        .max()
+        .unwrap_or(7);
+    let repo_width = std::cmp::max(8, max_repo_len + 2);
+
+    if has_multiple_repos {
+        let header = format!(
+            "{:<pkg_id_width$} {:<15} {:<15} {:<repo_width$} DESCRIPTION",
+            "PACKAGE ID", "INSTALLED", "AVAILABLE", "REPO"
+        );
+        let sep_len = std::cmp::max(70, header.len());
+        println!("{header}");
+        println!("{}", "-".repeat(sep_len));
+        for (pkg_id, inst_v, avail_v, repo) in &outdated_pkgs {
+            let repo = repo.clone().unwrap_or_else(|| "default".into());
+            let (def, _) = catalogue
+                .get_package_definition_with_source(pkg_id, None)?
+                .unwrap_or((serde_json::Value::Null, String::new()));
+            let desc = def.get("description").map(py_str).unwrap_or_default();
+            println!(
+                "{pkg_id:<pkg_id_width$} {inst_v:<15} {avail_v:<15} {repo:<repo_width$} {desc}"
+            );
+        }
+    } else {
+        let header = format!(
+            "{:<pkg_id_width$} {:<15} {:<15} DESCRIPTION",
+            "PACKAGE ID", "INSTALLED", "AVAILABLE"
+        );
+        let sep_len = std::cmp::max(65, header.len());
+        println!("{header}");
+        println!("{}", "-".repeat(sep_len));
+        for (pkg_id, inst_v, avail_v, _) in &outdated_pkgs {
+            let (def, _) = catalogue
+                .get_package_definition_with_source(pkg_id, None)?
+                .unwrap_or((serde_json::Value::Null, String::new()));
+            let desc = def.get("description").map(py_str).unwrap_or_default();
+            println!("{pkg_id:<pkg_id_width$} {inst_v:<15} {avail_v:<15} {desc}");
+        }
+    }
+
+    println!("\nRun 'aster upgrade' to upgrade all packages.");
+    Ok(1)
 }
 
 fn upgrade(
