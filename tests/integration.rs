@@ -785,6 +785,82 @@ fn test_info_command_shows_installed_section_after_install() {
 }
 
 #[test]
+fn test_outdated_returns_zero_when_nothing_installed() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+    let out = f.run_cli(&["outdated"]);
+    assert_eq!(code(&out), 0);
+    assert!(stdout(&out).contains("No packages currently installed."));
+}
+
+#[test]
+fn test_outdated_returns_zero_when_up_to_date() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+    assert_eq!(code(&f.run_cli(&["install", "fastfetch-bin"])), 0);
+
+    let out = f.run_cli(&["outdated"]);
+    assert_eq!(code(&out), 0);
+    assert!(stdout(&out).contains("All installed packages are up to date."));
+}
+
+#[test]
+fn test_outdated_lists_outdated_package_with_exit_one() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+    assert_eq!(code(&f.run_cli(&["install", "fastfetch-bin"])), 0);
+
+    // Downgrade the recorded installed version so the catalogue version
+    // appears newer.
+    let registry = f.registry();
+    let mut data = f.config.load_json(&f.config.packages_json).unwrap();
+    data["installed"]["fastfetch-bin"]["version"] = json!("0.0.1-old");
+    f.config
+        .save_json_atomic(&f.config.packages_json, &serde_json::Value::Object(data))
+        .unwrap();
+    drop(registry);
+
+    let out = f.run_cli(&["outdated"]);
+    assert_eq!(code(&out), 1);
+    let text = stdout(&out);
+    assert!(text.contains("fastfetch-bin"));
+    assert!(text.contains("0.0.1-old"));
+    assert!(text.contains("2.30.0"));
+    assert!(text.contains("Run 'aster upgrade' to upgrade all packages."));
+}
+
+#[test]
+fn test_outdated_does_not_refresh_catalogue_indexes() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+    assert_eq!(code(&f.run_cli(&["install", "fastfetch-bin"])), 0);
+
+    // Snapshot the cached index mtime and confirm `outdated` leaves it alone.
+    let cached_index = f.config.repository_cache.join("default").join("index.json");
+    assert!(
+        cached_index.exists(),
+        "cached index should exist after update"
+    );
+    let mtime_before = std::fs::metadata(&cached_index)
+        .unwrap()
+        .modified()
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    assert_eq!(code(&f.run_cli(&["outdated"])), 0);
+
+    let mtime_after = std::fs::metadata(&cached_index)
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert_eq!(
+        mtime_before, mtime_after,
+        "outdated must not touch the cached catalogue index"
+    );
+}
+
+#[test]
 fn test_package_installer_public_api() {
     // Guard against accidental signature drift for the test seam.
     let _ctor: fn(
