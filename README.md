@@ -26,6 +26,9 @@ aster search <query>       # search available packages
 aster install <package>    # install a package and its dependencies
 aster list                 # list installed packages
 aster remove <package>     # uninstall a package
+aster outdated             # list installed packages with newer catalogue versions available
+aster upgrade [package]    # upgrade one (or all) installed packages
+aster upgrade -y           # upgrade all without prompting on custom build steps
 aster self-update          # update aster to the latest release
 aster doctor               # check the installation for problems
 ```

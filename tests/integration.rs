@@ -861,6 +861,164 @@ fn test_outdated_does_not_refresh_catalogue_indexes() {
 }
 
 #[test]
+fn test_upgrade_yes_flag_skips_custom_steps_prompt_on_cli() {
+    let f = Fixture::new();
+
+    let repo_dir = f.temp.path().join("yflag_repo");
+    fs::create_dir_all(repo_dir.join("packages")).unwrap();
+
+    let v1_archive = f.temp.path().join("yflag-1.0.0.tar.gz");
+    make_tar_gz(&v1_archive, &[("myscript", b"#!/bin/sh\necho v1", 0o755)]);
+
+    write_json(
+        &repo_dir.join("index.json"),
+        &json!({
+            "schema_version": 1,
+            "packages": {
+                "yflagpkg": {"definition": "packages/yflagpkg.json", "type": "source", "description": "Y flag Pkg"}
+            }
+        }),
+    );
+    write_json(
+        &repo_dir.join("packages/yflagpkg.json"),
+        &json!({
+            "schema_version": 1,
+            "id": "yflagpkg",
+            "name": "yflagpkg",
+            "version": "1.0.0",
+            "type": "source",
+            "source": {"type": "tar.gz", "url": format!("file://{}", v1_archive.display())},
+            "build": {"steps": ["chmod +x myscript"]},
+            "executables": ["myscript"]
+        }),
+    );
+
+    let repos = json!({
+        "schema_version": 1,
+        "repositories": {
+            "default": {"name": "default", "url": repo_dir.to_string_lossy(), "priority": 100}
+        }
+    });
+    f.config
+        .save_json_atomic(&f.config.repositories_json, &repos)
+        .unwrap();
+
+    // Initial install uses -y to skip the custom-steps prompt.
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+    assert_eq!(code(&f.run_cli(&["install", "yflagpkg", "-y"])), 0);
+    assert!(f.config.bin_dir.join("myscript").exists());
+
+    // Bump the catalogue version so 'aster upgrade' has work to do.
+    write_json(
+        &repo_dir.join("packages/yflagpkg.json"),
+        &json!({
+            "schema_version": 1,
+            "id": "yflagpkg",
+            "name": "yflagpkg",
+            "version": "2.0.0",
+            "type": "source",
+            "source": {"type": "tar.gz", "url": format!("file://{}", v1_archive.display())},
+            "build": {"steps": ["chmod +x myscript"]},
+            "executables": ["myscript"]
+        }),
+    );
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+
+    // 'aster upgrade -y' must succeed, skipping the prompt.
+    assert_eq!(code(&f.run_cli(&["upgrade", "yflagpkg", "-y"])), 0);
+
+    // The recorded installed version should now be 2.0.0.
+    let info = f
+        .registry()
+        .get_installed_package("yflagpkg")
+        .unwrap()
+        .unwrap();
+    assert_eq!(info["version"], "2.0.0");
+}
+
+#[test]
+fn test_upgrade_without_yes_flag_declines_custom_steps_on_cli() {
+    let f = Fixture::new();
+
+    let repo_dir = f.temp.path().join("noflag_repo");
+    fs::create_dir_all(repo_dir.join("packages")).unwrap();
+
+    let v1_archive = f.temp.path().join("noflag-1.0.0.tar.gz");
+    make_tar_gz(&v1_archive, &[("myscript", b"#!/bin/sh\necho v1", 0o755)]);
+
+    write_json(
+        &repo_dir.join("index.json"),
+        &json!({
+            "schema_version": 1,
+            "packages": {
+                "noflagpkg": {"definition": "packages/noflagpkg.json", "type": "source", "description": "No flag Pkg"}
+            }
+        }),
+    );
+    write_json(
+        &repo_dir.join("packages/noflagpkg.json"),
+        &json!({
+            "schema_version": 1,
+            "id": "noflagpkg",
+            "name": "noflagpkg",
+            "version": "1.0.0",
+            "type": "source",
+            "source": {"type": "tar.gz", "url": format!("file://{}", v1_archive.display())},
+            "build": {"steps": ["chmod +x myscript"]},
+            "executables": ["myscript"]
+        }),
+    );
+
+    let repos = json!({
+        "schema_version": 1,
+        "repositories": {
+            "default": {"name": "default", "url": repo_dir.to_string_lossy(), "priority": 100}
+        }
+    });
+    f.config
+        .save_json_atomic(&f.config.repositories_json, &repos)
+        .unwrap();
+
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+    assert_eq!(code(&f.run_cli(&["install", "noflagpkg", "-y"])), 0);
+    assert!(f.config.bin_dir.join("myscript").exists());
+
+    // Bump catalogue version.
+    write_json(
+        &repo_dir.join("packages/noflagpkg.json"),
+        &json!({
+            "schema_version": 1,
+            "id": "noflagpkg",
+            "name": "noflagpkg",
+            "version": "2.0.0",
+            "type": "source",
+            "source": {"type": "tar.gz", "url": format!("file://{}", v1_archive.display())},
+            "build": {"steps": ["chmod +x myscript"]},
+            "executables": ["myscript"]
+        }),
+    );
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+
+    // 'aster upgrade <pkg>' WITHOUT -y: prompt_line returns None on a
+    // closed/empty stdin (no TTY in tests), which the installer treats as
+    // "no". So the upgrade must abort and roll back, leaving the recorded
+    // version at 1.0.0.
+    let out = f.run_cli(&["upgrade", "noflagpkg"]);
+    assert_ne!(code(&out), 0);
+    assert!(stdout(&out).contains("Installation cancelled by user."));
+
+    let info = f
+        .registry()
+        .get_installed_package("noflagpkg")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        info["version"], "1.0.0",
+        "declined upgrade must roll back to the pre-upgrade version"
+    );
+}
+
+#[test]
 fn test_package_installer_public_api() {
     // Guard against accidental signature drift for the test seam.
     let _ctor: fn(

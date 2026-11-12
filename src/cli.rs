@@ -77,6 +77,10 @@ enum Commands {
     Upgrade {
         #[arg(default_value = "")]
         package: String,
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
+        #[arg(short = 'v', long = "verbose")]
+        verbose: bool,
     },
     /// Manage package repositories
     Repo {
@@ -372,7 +376,11 @@ fn dispatch(
         Commands::Update => update(registry, catalogue),
         Commands::Outdated => outdated(registry, catalogue),
         Commands::SelfUpdate => self_update(config),
-        Commands::Upgrade { package } => upgrade(registry, catalogue, installer, &package),
+        Commands::Upgrade {
+            package,
+            yes,
+            verbose,
+        } => upgrade(registry, catalogue, installer, &package, yes, verbose),
         Commands::Repo { command } => repo(config, catalogue, command),
         Commands::Config { command } => config_cmd(config, command),
         Commands::Completions { shell } => completions(shell),
@@ -978,6 +986,8 @@ fn upgrade(
     catalogue: &CatalogueManager,
     installer: &PackageInstaller,
     target_pkg: &str,
+    auto_yes: bool,
+    verbose: bool,
 ) -> crate::error::Result<i32> {
     catalogue.update_all()?;
 
@@ -1003,7 +1013,7 @@ fn upgrade(
         let avail_ver = pkg_def.get("version").map(py_str).unwrap_or_default();
         if compare_versions(&inst_ver, &avail_ver) < 0 {
             println!("Upgrading '{target_pkg}' from {inst_ver} to {avail_ver}...");
-            installer.upgrade_package(target_pkg, false, false)?;
+            installer.upgrade_package(target_pkg, auto_yes, verbose)?;
         } else {
             println!("Package '{target_pkg}' is already at latest version ({inst_ver}).");
         }
@@ -1021,7 +1031,7 @@ fn upgrade(
                 let avail_ver = pkg_def.get("version").map(py_str).unwrap_or_default();
                 if compare_versions(&inst_ver, &avail_ver) < 0 {
                     println!("Upgrading '{pkg_id}' from {inst_ver} to {avail_ver}...");
-                    installer.upgrade_package(&pkg_id, false, false)?;
+                    installer.upgrade_package(&pkg_id, auto_yes, verbose)?;
                     upgraded_any = true;
                 }
             }
