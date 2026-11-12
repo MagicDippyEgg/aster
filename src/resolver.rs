@@ -115,7 +115,7 @@ impl DependencyResolver {
 
 /// Extracts dependency IDs. When `include_build` is false only `dependencies`
 /// and `runtime.dependencies` are considered.
-fn collect_dependencies(pkg_def: &Value, include_build: bool) -> Vec<String> {
+pub(crate) fn collect_dependencies(pkg_def: &Value, include_build: bool) -> Vec<String> {
     let mut deps: Vec<String> = Vec::new();
 
     if let Some(arr) = pkg_def.get("dependencies").and_then(|v| v.as_array()) {

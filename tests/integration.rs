@@ -721,6 +721,70 @@ fn test_cli_repo_priority_commands() {
 }
 
 #[test]
+fn test_info_command_displays_catalogue_dependencies_source_and_provided_binaries() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+
+    // Binary package with no dependencies, not yet installed.
+    let out_bin = f.run_cli(&["info", "fastfetch-bin"]);
+    assert_eq!(code(&out_bin), 0);
+    let bin_text = stdout(&out_bin);
+    assert!(bin_text.contains("Package: fastfetch-bin"));
+    assert!(bin_text.contains("Type:                 binary"));
+    assert!(bin_text.contains("Catalogue Version:"));
+    assert!(bin_text.contains("Repository:           default"));
+    assert!(bin_text.contains("Dependencies:         (none)"));
+    assert!(bin_text.contains("Provided Binaries:    (discovered at install time)"));
+    // Should not show source/build fields for binary packages.
+    assert!(!bin_text.contains("Source Type:"));
+    assert!(!bin_text.contains("Build System:"));
+
+    // Binary package with a dependency.
+    let out_dep = f.run_cli(&["info", "app-with-dep"]);
+    assert_eq!(code(&out_dep), 0);
+    let dep_text = stdout(&out_dep);
+    assert!(dep_text.contains("Dependencies:         dep-lib"));
+
+    // Source package with a make build system.
+    let out_src = f.run_cli(&["info", "test-src"]);
+    assert_eq!(code(&out_src), 0);
+    let src_text = stdout(&out_src);
+    assert!(src_text.contains("Type:                 source"));
+    assert!(src_text.contains("Source Type:          tar.gz"));
+    assert!(
+        src_text.starts_with("Source URL:           ")
+            || src_text.contains("Source URL:           file://")
+    );
+    assert!(src_text.contains("Build System:         make"));
+
+    // Source package with custom build steps.
+    let out_steps = f.run_cli(&["info", "htop-src"]);
+    assert_eq!(code(&out_steps), 0);
+    let steps_text = stdout(&out_steps);
+    assert!(steps_text.contains("Build Steps:"));
+    assert!(steps_text.contains("mkdir -p staging_bin"));
+
+    // Non-existent package returns exit 1 with a helpful message.
+    let out_missing = f.run_cli(&["info", "does-not-exist"]);
+    assert_eq!(code(&out_missing), 1);
+    assert!(stdout(&out_missing).contains("not found in registry or catalogue"));
+}
+
+#[test]
+fn test_info_command_shows_installed_section_after_install() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+    assert_eq!(code(&f.run_cli(&["install", "fastfetch-bin"])), 0);
+
+    let out = f.run_cli(&["info", "fastfetch-bin"]);
+    assert_eq!(code(&out), 0);
+    let text = stdout(&out);
+    assert!(text.contains("Provided Binaries:    fastfetch"));
+    assert!(text.contains("\nInstalled:\n"));
+    assert!(text.contains("Installation Dir:"));
+}
+
+#[test]
 fn test_package_installer_public_api() {
     // Guard against accidental signature drift for the test seam.
     let _ctor: fn(
