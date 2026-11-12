@@ -4,6 +4,7 @@ use crate::catalogue::{display_priority, CatalogueManager};
 use crate::config::AsterConfig;
 use crate::installer::PackageInstaller;
 use crate::registry::RegistryManager;
+use crate::resolver::collect_dependencies;
 use crate::schema::validate_repository_name;
 use crate::util::py_str;
 use crate::version::compare_versions;
@@ -542,61 +543,153 @@ fn info(
     pkg_id: &str,
 ) -> crate::error::Result<i32> {
     let installed_info = registry.get_installed_package(pkg_id)?;
-    let pkg_def = catalogue.get_package_definition(pkg_id, None)?;
+    let pkg_def_with_source = catalogue.get_package_definition_with_source(pkg_id, None)?;
 
-    if installed_info.is_none() && pkg_def.is_none() {
+    if installed_info.is_none() && pkg_def_with_source.is_none() {
         println!("Package '{pkg_id}' not found in registry or catalogue.");
         return Ok(1);
     }
 
     println!("Package: {pkg_id}");
-    if let Some(ii) = &installed_info {
-        println!(
-            "  Installed Version: {}",
-            ii.get("version")
-                .map(py_str)
-                .unwrap_or_else(|| "None".to_string())
+
+    if let Some((def, repo_name)) = &pkg_def_with_source {
+        print_field(
+            "Name",
+            &def.get("name").map(py_str).unwrap_or_else(|| "None".into()),
         );
-        println!(
-            "  Installation Dir:  {}",
-            ii.get("install_dir")
+        print_field(
+            "Catalogue Version",
+            &def.get("version")
                 .map(py_str)
-                .unwrap_or_else(|| "None".to_string())
+                .unwrap_or_else(|| "None".into()),
         );
+        print_field(
+            "Type",
+            &def.get("type").map(py_str).unwrap_or_else(|| "None".into()),
+        );
+        print_field(
+            "Description",
+            &def.get("description")
+                .map(py_str)
+                .unwrap_or_else(|| "N/A".into()),
+        );
+        print_field(
+            "Homepage",
+            &def.get("homepage")
+                .map(py_str)
+                .unwrap_or_else(|| "N/A".into()),
+        );
+        print_field("Repository", repo_name);
+
+        let deps = collect_dependencies(def, true);
+        let deps_str = if deps.is_empty() {
+            "(none)".to_string()
+        } else {
+            deps.join(", ")
+        };
+        print_field("Dependencies", &deps_str);
+
+        let pkg_type = def.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if pkg_type == "source" {
+            if let Some(src) = def.get("source").and_then(|v| v.as_object()) {
+                print_field(
+                    "Source Type",
+                    &src.get("type")
+                        .map(py_str)
+                        .unwrap_or_else(|| "unknown".into()),
+                );
+                if let Some(url) = src.get("url").and_then(|v| v.as_str()) {
+                    print_field("Source URL", url);
+                }
+                if let Some(git_ref) = src.get("ref").and_then(|v| v.as_str()) {
+                    print_field("Source Ref", git_ref);
+                }
+            }
+
+            if let Some(build) = def.get("build").and_then(|v| v.as_object()) {
+                if let Some(system) = build.get("system").and_then(|v| v.as_str()) {
+                    print_field("Build System", system);
+                }
+                if let Some(release) = build.get("release").and_then(|v| v.as_bool()) {
+                    print_field("Build Release", &release.to_string());
+                }
+                if let Some(locked) = build.get("locked").and_then(|v| v.as_bool()) {
+                    print_field("Build Locked", &locked.to_string());
+                }
+                if let Some(steps) = build.get("steps").and_then(|v| v.as_array()) {
+                    let steps_str = steps
+                        .iter()
+                        .filter_map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    if !steps_str.is_empty() {
+                        print_field("Build Steps", &steps_str);
+                    }
+                }
+            }
+
+            if let Some(exes) = def.get("executables").and_then(|v| v.as_array()) {
+                let exes_str = exes
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if !exes_str.is_empty() {
+                    print_field("Declared Executables", &exes_str);
+                }
+            }
+        }
+
+        let provided_str = if let Some(ii) = &installed_info {
+            ii.get("provided_binaries")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default()
+        } else {
+            def.get("executables")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default()
+        };
+        if provided_str.is_empty() {
+            print_field("Provided Binaries", "(discovered at install time)");
+        } else {
+            print_field("Provided Binaries", &provided_str);
+        }
     }
-    if let Some(def) = &pkg_def {
-        println!(
-            "  Name:        {}",
-            def.get("name")
+
+    if let Some(ii) = &installed_info {
+        println!();
+        println!("Installed:");
+        print_field(
+            "Version",
+            &ii.get("version")
                 .map(py_str)
-                .unwrap_or_else(|| "None".to_string())
+                .unwrap_or_else(|| "None".into()),
         );
-        println!(
-            "  Version:     {}",
-            def.get("version")
+        print_field(
+            "Installation Dir",
+            &ii.get("install_dir")
                 .map(py_str)
-                .unwrap_or_else(|| "None".to_string())
-        );
-        println!(
-            "  Type:        {}",
-            def.get("type")
-                .map(py_str)
-                .unwrap_or_else(|| "None".to_string())
-        );
-        println!(
-            "  Description: {}",
-            def.get("description")
-                .map(py_str)
-                .unwrap_or_else(|| "N/A".to_string())
-        );
-        println!(
-            "  Homepage:    {}",
-            def.get("homepage")
-                .map(py_str)
-                .unwrap_or_else(|| "N/A".to_string())
+                .unwrap_or_else(|| "None".into()),
         );
     }
     Ok(0)
+}
+
+fn print_field(label: &str, value: &str) {
+    let prefix = format!("  {label}:");
+    println!("{prefix:<23} {value}");
 }
 
 fn installed(registry: &RegistryManager, pkg_id: &str) -> crate::error::Result<i32> {
