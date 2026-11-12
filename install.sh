@@ -17,7 +17,7 @@ elif command -v wget >/dev/null 2>&1; then
 fi
 
 if [ -z "$TAG" ]; then
-    TAG="0.2.5"
+    TAG="0.2.7"
 fi
 
 DOWNLOAD_URL="https://github.com/MagicDippyEgg/aster/releases/download/${TAG}/aster"
@@ -44,13 +44,21 @@ mv "$TMP_BIN" "$ASTER_HOME/aster"
 
 echo "Successfully installed Aster (${TAG}) to ${ASTER_HOME}/aster"
 
+NEEDS_ASTER_HOME=
+NEEDS_BIN=
 case ":$PATH:" in
     *":$ASTER_HOME:"*) ;;
-    *)
-        echo ""
-        echo "Note: To run 'aster' from anywhere, add it to your PATH:"
-        echo "  export PATH=\"\$PATH:$ASTER_HOME\""
-        echo ""
-        echo "You can add this line to your shell configuration file (e.g. ~/.bashrc or ~/.zshrc)."
-        ;;
+    *) NEEDS_ASTER_HOME=1 ;;
 esac
+case ":$PATH:" in
+    *":$ASTER_HOME/bin:"*) ;;
+    *) NEEDS_BIN=1 ;;
+esac
+
+if [ -n "$NEEDS_ASTER_HOME" ] || [ -n "$NEEDS_BIN" ]; then
+    echo ""
+    echo "Note: To run 'aster' and the packages it installs from anywhere, add to your PATH:"
+    echo "  export PATH=\"\$PATH:$ASTER_HOME:$ASTER_HOME/bin\""
+    echo ""
+    echo "You can add this line to your shell configuration file (e.g. ~/.bashrc or ~/.zshrc)."
+fi
