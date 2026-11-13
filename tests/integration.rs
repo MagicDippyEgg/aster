@@ -1188,6 +1188,72 @@ fn test_search_uses_winning_repository_definition() {
 }
 
 #[test]
+fn test_search_type_filter_returns_only_binary_packages() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+
+    // The default fixture catalogue has fastfetch-bin (binary) and
+    // fastfetch-src is not in the fixture; htop-src / test-src are source.
+    // Search across everything and filter to binary.
+    let out_all = f.run_cli(&["search", "", "-t", "binary"]);
+    assert_eq!(code(&out_all), 0);
+    let text_all = stdout(&out_all);
+    assert!(text_all.contains("fastfetch-bin"));
+    assert!(!text_all.contains("htop-src"));
+    assert!(!text_all.contains("test-src"));
+    // No 'source' type column value should appear anywhere in the output.
+    assert!(!text_all.contains(" source "));
+}
+
+#[test]
+fn test_search_type_filter_returns_only_source_packages() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+
+    let out_all = f.run_cli(&["search", "", "-t", "source"]);
+    assert_eq!(code(&out_all), 0);
+    let text_all = stdout(&out_all);
+    assert!(text_all.contains("htop-src"));
+    assert!(text_all.contains("test-src"));
+    assert!(!text_all.contains("fastfetch-bin"));
+    assert!(!text_all.contains("ripgrep-bin"));
+    assert!(!text_all.contains("dep-lib"));
+    assert!(!text_all.contains("app-with-dep"));
+    // No 'binary' type column value should appear anywhere in the output.
+    assert!(!text_all.contains(" binary "));
+}
+
+#[test]
+fn test_search_type_filter_combines_with_query() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+
+    // 'htop' query with source filter -> only htop-src.
+    let out = f.run_cli(&["search", "htop", "-t", "source"]);
+    assert_eq!(code(&out), 0);
+    let text = stdout(&out);
+    assert!(text.contains("htop-src"));
+    // 'htop' query with binary filter -> no matches.
+    let out_empty = f.run_cli(&["search", "htop", "-t", "binary"]);
+    assert_eq!(code(&out_empty), 0);
+    assert!(stdout(&out_empty).contains("No packages of type 'binary' found matching 'htop'."));
+}
+
+#[test]
+fn test_search_type_filter_rejects_invalid_value() {
+    let f = Fixture::new();
+    // clap rejects unknown values before the dispatcher runs; the exit
+    // code is 2 (clap usage error), not 0 or 1.
+    let out = f.run_cli(&["search", "fastfetch", "-t", "invalid"]);
+    assert_eq!(code(&out), 2);
+    let text = stdout(&out);
+    let err = stderr(&out);
+    let combined = format!("{text}\n{err}");
+    assert!(combined.contains("invalid value 'invalid' for '--type <KIND>'"));
+    assert!(combined.contains("possible values: binary, source"));
+}
+
+#[test]
 fn test_install_records_actual_source_repository() {
     let f = Fixture::new();
 
