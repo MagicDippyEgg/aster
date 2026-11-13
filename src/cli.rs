@@ -31,6 +31,9 @@ enum Commands {
     Search {
         #[arg(default_value = "")]
         query: String,
+        /// Filter results by package type ('binary' or 'source').
+        #[arg(short = 't', long = "type", value_parser = ["binary", "source"])]
+        kind: Option<String>,
     },
     /// Show metadata for a package
     Info { package: String },
@@ -349,7 +352,7 @@ fn dispatch(
 ) -> crate::error::Result<i32> {
     match command {
         Commands::List => list(registry),
-        Commands::Search { query } => search(catalogue, &query),
+        Commands::Search { query, kind } => search(catalogue, &query, kind.as_deref()),
         Commands::Info { package } => info(registry, catalogue, &package),
         Commands::Installed { package } => installed(registry, &package),
         Commands::Install {
@@ -473,10 +476,26 @@ fn list(registry: &RegistryManager) -> crate::error::Result<i32> {
     Ok(0)
 }
 
-fn search(catalogue: &CatalogueManager, query: &str) -> crate::error::Result<i32> {
-    let results = catalogue.search_packages(query)?;
+fn search(
+    catalogue: &CatalogueManager,
+    query: &str,
+    kind: Option<&str>,
+) -> crate::error::Result<i32> {
+    let mut results = catalogue.search_packages(query)?;
+    if let Some(kind) = kind {
+        results.retain(|_, info| {
+            info.get("type")
+                .and_then(|v| v.as_str())
+                .map(|t| t == kind)
+                .unwrap_or(false)
+        });
+    }
     if results.is_empty() {
-        println!("No packages found matching '{query}'.");
+        if let Some(kind) = kind {
+            println!("No packages of type '{kind}' found matching '{query}'.");
+        } else {
+            println!("No packages found matching '{query}'.");
+        }
     } else {
         let multi_repo = catalogue.get_repositories()?.len() > 1;
         if multi_repo {

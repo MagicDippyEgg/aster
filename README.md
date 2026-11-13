@@ -23,6 +23,8 @@ The binary is produced at `target/release/aster`.
 ```sh
 aster repo update          # refresh package indexes
 aster search <query>       # search available packages
+aster search <query> -t binary  # search only precompiled binary packages
+aster search <query> -t source  # search only source-build packages
 aster install <package>    # install a package and its dependencies
 aster list                 # list installed packages
 aster remove <package>     # uninstall a package
