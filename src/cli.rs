@@ -389,7 +389,7 @@ fn dispatch(
             }
         }
         Commands::Clean { dry_run } => clean(config, dry_run),
-        Commands::Doctor => doctor(config),
+        Commands::Doctor => doctor(config, registry, catalogue),
         Commands::Verify { package } => verify(registry, &package),
         Commands::History { limit } => history(config, limit),
         Commands::Update => update(registry, catalogue),
@@ -901,7 +901,11 @@ fn format_size_cli(bytes: u64) -> String {
     }
 }
 
-fn doctor(config: &AsterConfig) -> crate::error::Result<i32> {
+fn doctor(
+    config: &AsterConfig,
+    registry: &RegistryManager,
+    catalogue: &CatalogueManager,
+) -> crate::error::Result<i32> {
     println!("Aster Doctor - Diagnostic Check");
     println!("{}", "=".repeat(40));
     println!("Aster Home: {}", config.root_dir.display());
@@ -943,6 +947,80 @@ fn doctor(config: &AsterConfig) -> crate::error::Result<i32> {
         match crate::util::which(tool, None) {
             Some(found) => println!("  {tool:<10}: FOUND ({})", found.display()),
             None => println!("  {tool:<10}: NOT FOUND"),
+        }
+    }
+
+    // Disk usage section: per-cache-directory sizes + total $ASTER_HOME size.
+    println!("\nDisk Usage:");
+    let cache_dirs: [(&Path, &str); 4] = [
+        (&config.packages_dir, "packages"),
+        (&config.downloads_cache, "downloads"),
+        (&config.archives_cache, "archives"),
+        (&config.build_dir, "build"),
+    ];
+    let mut cache_total: u64 = 0;
+    for (path, label) in &cache_dirs {
+        let (size, _entries) = dir_size_and_count(path);
+        cache_total += size;
+        println!("  {label:<10}: {}", format_size_cli(size));
+    }
+    let home_total = dir_size_and_count(&config.root_dir).0;
+    println!(
+        "  {:<10}: {} (total under $ASTER_HOME)",
+        "total",
+        format_size_cli(home_total)
+    );
+    if cache_total > 0 {
+        println!(
+            "  Hint: run 'aster clean --dry-run' to preview reclaiming up to {} from caches.",
+            format_size_cli(cache_total)
+        );
+    }
+
+    // Installed packages section: count + list.
+    let installed = registry.list_installed()?;
+    println!("\nInstalled Packages ({}):", installed.len());
+    if installed.is_empty() {
+        println!("  (none)");
+    } else {
+        for (pkg_id, info) in installed.iter() {
+            let version = info
+                .get("version")
+                .map(py_str)
+                .unwrap_or_else(|| "?".into());
+            let ptype = info.get("type").map(py_str).unwrap_or_else(|| "?".into());
+            println!("  {pkg_id} ({version}, {ptype})");
+        }
+    }
+
+    // Orphaned packages section: installed packages whose catalogue
+    // definition was removed (or was never present in any configured repo).
+    // Skipped silently when no packages are installed.
+    if !installed.is_empty() {
+        let mut orphans: Vec<String> = Vec::new();
+        for pkg_id in installed.keys() {
+            match catalogue.get_package_definition(pkg_id, None) {
+                Ok(Some(_)) => {}
+                Ok(None) => orphans.push(pkg_id.clone()),
+                // Catalogue fetch errors are not reported as orphans; the
+                // user can run 'aster repo update' themselves.
+                Err(_) => {}
+            }
+        }
+        println!("\nOrphaned Packages:");
+        if orphans.is_empty() {
+            println!("  (none — all installed packages have a catalogue definition)");
+        } else {
+            for id in &orphans {
+                println!("  - {id}");
+            }
+            println!(
+                "  Hint: {} package(s) have no catalogue definition. They still work, but",
+                orphans.len()
+            );
+            println!("        'aster upgrade' cannot upgrade them and 'aster info' cannot show");
+            println!("        catalogue details. Remove with 'aster remove <id>' or restore the");
+            println!("        definition in a configured repository.");
         }
     }
 

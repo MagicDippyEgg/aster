@@ -17,7 +17,7 @@ elif command -v wget >/dev/null 2>&1; then
 fi
 
 if [ -z "$TAG" ]; then
-    TAG="0.2.8"
+    TAG="0.2.9"
 fi
 
 DOWNLOAD_URL="https://github.com/MagicDippyEgg/aster/releases/download/${TAG}/aster"

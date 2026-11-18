@@ -2133,6 +2133,157 @@ fn test_clean_without_dry_run_still_works() {
 }
 
 #[test]
+fn test_doctor_shows_disk_usage_section_with_sizes() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+    // Install a package to populate cache/downloads + packages dir.
+    assert_eq!(code(&f.run_cli(&["install", "fastfetch-bin"])), 0);
+
+    let out = f.run_cli(&["doctor"]);
+    assert_eq!(code(&out), 0);
+    let text = stdout(&out);
+    assert!(text.contains("Disk Usage:"));
+    // All four cache-directory labels are present (printed as '  <label>  :').
+    for label in ["packages", "downloads", "archives", "build"] {
+        assert!(
+            text.contains(label),
+            "doctor output should mention '{label}': {text}"
+        );
+    }
+    // Total line.
+    assert!(text.contains("total"));
+    assert!(text.contains("(total under $ASTER_HOME)"));
+    // Hint pointing to 'aster clean --dry-run' is shown when cache_total > 0.
+    assert!(text.contains("Hint: run 'aster clean --dry-run'"));
+}
+
+#[test]
+fn test_doctor_shows_installed_packages_section() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+
+    // Empty install: doctor reports "(none)".
+    let out_empty = f.run_cli(&["doctor"]);
+    assert_eq!(code(&out_empty), 0);
+    let text_empty = stdout(&out_empty);
+    assert!(text_empty.contains("Installed Packages (0):"));
+    assert!(text_empty.contains("  (none)"));
+    // The Orphaned Packages section must be SKIPPED when nothing is installed.
+    assert!(!text_empty.contains("Orphaned Packages:"));
+
+    // After installing one package, the count goes up and the package is listed.
+    assert_eq!(code(&f.run_cli(&["install", "fastfetch-bin"])), 0);
+    let out = f.run_cli(&["doctor"]);
+    assert_eq!(code(&out), 0);
+    let text = stdout(&out);
+    assert!(text.contains("Installed Packages (1):"));
+    assert!(text.contains("fastfetch-bin"));
+    assert!(text.contains("binary"));
+    // Now the Orphaned Packages section is shown (none expected).
+    assert!(text.contains("Orphaned Packages:"));
+    assert!(text.contains("(none"));
+}
+
+#[test]
+fn test_doctor_detects_orphaned_packages() {
+    let f = Fixture::new();
+
+    // Build a small local repo with one package; install it; then remove
+    // the package from the repo's index; repo update; doctor must flag the
+    // orphan.
+    let repo_dir = f.temp.path().join("orphan_repo");
+    fs::create_dir_all(repo_dir.join("packages")).unwrap();
+
+    let pkg_archive = f.temp.path().join("orphan-pkg.tar.gz");
+    make_tar_gz(
+        &pkg_archive,
+        &[("bin/orphantool", b"#!/bin/sh\necho orphantool", 0o755)],
+    );
+
+    write_json(
+        &repo_dir.join("index.json"),
+        &json!({
+            "schema_version": 1,
+            "packages": {
+                "orphanpkg": {"definition": "packages/orphanpkg.json", "type": "binary", "description": "Orphan Pkg"}
+            }
+        }),
+    );
+    write_json(
+        &repo_dir.join("packages/orphanpkg.json"),
+        &json!({
+            "schema_version": 1,
+            "id": "orphanpkg",
+            "name": "orphanpkg",
+            "version": "1.0.0",
+            "type": "binary",
+            "downloads": {
+                "linux-x86_64": {"url": format!("file://{}", pkg_archive.display())},
+                "linux-aarch64": {"url": format!("file://{}", pkg_archive.display())}
+            }
+        }),
+    );
+
+    let repos = json!({
+        "schema_version": 1,
+        "repositories": {
+            "default": {"name": "default", "url": f.cat_dir.to_string_lossy(), "priority": 100},
+            "orphan-repo": {"name": "orphan-repo", "url": repo_dir.to_string_lossy(), "priority": 200}
+        }
+    });
+    f.config
+        .save_json_atomic(&f.config.repositories_json, &repos)
+        .unwrap();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+    assert_eq!(code(&f.run_cli(&["install", "orphanpkg"])), 0);
+
+    // Doctor before removing the catalogue entry: orphanpkg is NOT flagged.
+    let out_before = f.run_cli(&["doctor"]);
+    assert_eq!(code(&out_before), 0);
+    let text_before = stdout(&out_before);
+    assert!(text_before.contains("Orphaned Packages:"));
+    assert!(text_before.contains("(none"));
+    assert!(!text_before.contains("- orphanpkg"));
+
+    // Remove orphanpkg from the local repo's index and refresh.
+    write_json(
+        &repo_dir.join("index.json"),
+        &json!({"schema_version": 1, "packages": {}}),
+    );
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+
+    // Doctor now: orphanpkg is flagged as orphan.
+    let out_after = f.run_cli(&["doctor"]);
+    assert_eq!(code(&out_after), 0);
+    let text_after = stdout(&out_after);
+    assert!(text_after.contains("Orphaned Packages:"));
+    assert!(text_after.contains("- orphanpkg"));
+    assert!(text_after.contains("Hint:"));
+    assert!(text_after.contains("'aster remove <id>'"));
+
+    // The orphaned package is still listed in the Installed Packages section.
+    assert!(text_after.contains("orphanpkg"));
+    assert!(text_after.contains("Installed Packages"));
+}
+
+#[test]
+fn test_doctor_preserves_path_and_build_tools_sections() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+
+    let out = f.run_cli(&["doctor"]);
+    assert_eq!(code(&out), 0);
+    let text = stdout(&out);
+    // Pre-existing sections are preserved.
+    assert!(text.contains("Aster Doctor - Diagnostic Check"));
+    assert!(text.contains("Aster Home:"));
+    assert!(text.contains("in PATH:"));
+    assert!(text.contains("Build Tools Availability:"));
+    assert!(text.contains("git"));
+    assert!(text.contains("cmake"));
+}
+
+#[test]
 fn test_verify_intact_and_broken() {
     let f = Fixture::new();
     assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
