@@ -2047,6 +2047,92 @@ fn test_upgrade_dry_run_returns_one_when_no_packages_installed() {
 }
 
 #[test]
+fn test_clean_dry_run_reports_empty_caches_when_nothing_installed() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+
+    let out = f.run_cli(&["clean", "--dry-run"]);
+    assert_eq!(code(&out), 0);
+    let text = stdout(&out);
+    assert!(text.contains("Dry run: Cleanup plan"));
+    assert!(text.contains("downloads"));
+    assert!(text.contains("archives"));
+    assert!(text.contains("build"));
+    assert!(text.contains("0 B (0 entries)"));
+    assert!(text.contains("Summary: nothing to reclaim"));
+}
+
+#[test]
+fn test_clean_dry_run_shows_size_and_entries_for_populated_caches() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+    // Install a binary package to populate cache/downloads with the archive.
+    assert_eq!(code(&f.run_cli(&["install", "fastfetch-bin"])), 0);
+
+    let out = f.run_cli(&["clean", "--dry-run"]);
+    assert_eq!(code(&out), 0);
+    let text = stdout(&out);
+    assert!(text.contains("Dry run: Cleanup plan"));
+    // The downloads cache must report at least one entry (the downloaded
+    // archive) and a non-zero size.
+    assert!(text.contains("downloads"));
+    // Summary line present.
+    assert!(text.contains("Summary: would reclaim"));
+    assert!(text.contains("entries"));
+    assert!(text.contains("Run 'aster clean' (without --dry-run)"));
+
+    // The dry-run must NOT have actually deleted the downloaded archive.
+    let downloads = f.config.downloads_cache;
+    assert!(downloads.exists());
+    let n_entries = std::fs::read_dir(&downloads).unwrap().count();
+    assert!(
+        n_entries >= 1,
+        "downloads cache must still contain the archive after dry-run"
+    );
+}
+
+#[test]
+fn test_clean_dry_run_does_not_delete_anything() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+    assert_eq!(code(&f.run_cli(&["install", "fastfetch-bin"])), 0);
+
+    // Snapshot the contents of each cache directory before the dry-run.
+    let snapshot = |dir: &std::path::Path| -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect()
+    };
+    let dl_before = snapshot(&f.config.downloads_cache);
+    let build_before = snapshot(&f.config.build_dir);
+
+    assert_eq!(code(&f.run_cli(&["clean", "--dry-run"])), 0);
+
+    let dl_after = snapshot(&f.config.downloads_cache);
+    let build_after = snapshot(&f.config.build_dir);
+    assert_eq!(dl_before, dl_after, "downloads cache must be unchanged");
+    assert_eq!(build_before, build_after, "build dir must be unchanged");
+}
+
+#[test]
+fn test_clean_without_dry_run_still_works() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+    assert_eq!(code(&f.run_cli(&["install", "fastfetch-bin"])), 0);
+
+    // The downloads cache should have at least one entry after install.
+    let dl = f.config.downloads_cache.clone();
+    assert!(std::fs::read_dir(&dl).unwrap().count() >= 1);
+
+    // Real clean (no --dry-run) must delete the contents and report success.
+    let out = f.run_cli(&["clean"]);
+    assert_eq!(code(&out), 0);
+    assert!(stdout(&out).contains("Successfully cleared build and download caches."));
+    assert_eq!(std::fs::read_dir(&dl).unwrap().count(), 0);
+}
+
+#[test]
 fn test_verify_intact_and_broken() {
     let f = Fixture::new();
     assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
