@@ -54,6 +54,8 @@ enum Commands {
         package: String,
         #[arg(long)]
         force: bool,
+        #[arg(long = "dry-run")]
+        dry_run: bool,
     },
     /// Clear temporary build and download caches
     Clean,
@@ -368,9 +370,17 @@ fn dispatch(
                 Ok(0)
             }
         }
-        Commands::Remove { package, force } => {
-            installer.remove(&package, force)?;
-            Ok(0)
+        Commands::Remove {
+            package,
+            force,
+            dry_run,
+        } => {
+            if dry_run {
+                installer.dry_run_remove(&package, force)
+            } else {
+                installer.remove(&package, force)?;
+                Ok(0)
+            }
         }
         Commands::Clean => clean(config),
         Commands::Doctor => doctor(config),

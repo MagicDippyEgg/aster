@@ -1732,6 +1732,112 @@ fn test_install_dry_run_lists_all_packages_in_plan() {
 }
 
 #[test]
+fn test_remove_dry_run_shows_what_would_be_deleted_and_exits_zero() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+    assert_eq!(code(&f.run_cli(&["install", "fastfetch-bin"])), 0);
+
+    let out = f.run_cli(&["remove", "--dry-run", "fastfetch-bin"]);
+    assert_eq!(code(&out), 0);
+    let text = stdout(&out);
+    assert!(text.contains("Dry run: Removal plan for 'fastfetch-bin':"));
+    assert!(text.contains("Would delete:"));
+    // Package directory is shown.
+    assert!(text.contains("Package directory:"));
+    assert!(text.contains("fastfetch-bin"));
+    // Provided binary symlink 'fastfetch' is listed.
+    assert!(text.contains("fastfetch"));
+    assert!(text.contains("-> "));
+    // Registry entry mention.
+    assert!(text.contains("packages.json"));
+    // Reverse dependencies section (none here).
+    assert!(text.contains("Reverse dependencies:"));
+    assert!(text.contains("(none)"));
+    // Summary line.
+    assert!(text.contains("Summary: would remove 'fastfetch-bin'"));
+    assert!(text.contains("no reverse dependencies"));
+}
+
+#[test]
+fn test_remove_dry_run_does_not_actually_remove() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+    assert_eq!(code(&f.run_cli(&["install", "fastfetch-bin"])), 0);
+
+    assert_eq!(
+        code(&f.run_cli(&["remove", "--dry-run", "fastfetch-bin"])),
+        0
+    );
+
+    // Package must still be installed after the dry run.
+    assert_eq!(code(&f.run_cli(&["installed", "fastfetch-bin"])), 0);
+    let info = f
+        .registry()
+        .get_installed_package("fastfetch-bin")
+        .unwrap()
+        .unwrap();
+    assert_eq!(info["version"], "2.30.0");
+    // Symlink must still exist.
+    assert!(f.config.bin_dir.join("fastfetch").exists());
+}
+
+#[test]
+fn test_remove_dry_run_returns_one_when_not_installed() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+    let out = f.run_cli(&["remove", "--dry-run", "not-installed-pkg"]);
+    assert_eq!(code(&out), 1);
+    assert!(stdout(&out).contains("not installed"));
+}
+
+#[test]
+fn test_remove_dry_run_warns_about_reverse_dependencies() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+    // app-with-dep depends on dep-lib; installing app-with-dep pulls in dep-lib.
+    assert_eq!(code(&f.run_cli(&["install", "app-with-dep"])), 0);
+    assert_eq!(code(&f.run_cli(&["installed", "dep-lib"])), 0);
+
+    // Dry-run remove dep-lib (which app-with-dep depends on).
+    let out = f.run_cli(&["remove", "--dry-run", "dep-lib"]);
+    assert_eq!(code(&out), 0);
+    let text = stdout(&out);
+    assert!(text.contains("Reverse dependencies:"));
+    assert!(text.contains("app-with-dep"));
+    // The default (no --force) path must warn and mention --force.
+    assert!(text.contains("Warning:"));
+    assert!(text.contains("--force"));
+    // Summary must say BLOCKED.
+    assert!(text.contains("BLOCKED: 1 dependent(s) need --force"));
+    // Nothing was actually removed.
+    assert_eq!(code(&f.run_cli(&["installed", "dep-lib"])), 0);
+    assert_eq!(code(&f.run_cli(&["installed", "app-with-dep"])), 0);
+}
+
+#[test]
+fn test_remove_dry_run_force_notes_dependents_will_be_broken() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+    assert_eq!(code(&f.run_cli(&["install", "app-with-dep"])), 0);
+
+    // Dry-run remove dep-lib with --force: must NOT block, must note that the
+    // dependent will be left broken.
+    let out = f.run_cli(&["remove", "--dry-run", "dep-lib", "--force"]);
+    assert_eq!(code(&out), 0);
+    let text = stdout(&out);
+    assert!(text.contains("Reverse dependencies:"));
+    assert!(text.contains("app-with-dep"));
+    assert!(text.contains("--force is set"));
+    assert!(text.contains("left installed but broken"));
+    assert!(text.contains("Summary: would remove 'dep-lib'"));
+    assert!(text.contains("--force set"));
+    assert!(text.contains("will be broken"));
+    // Nothing was actually removed.
+    assert_eq!(code(&f.run_cli(&["installed", "dep-lib"])), 0);
+    assert_eq!(code(&f.run_cli(&["installed", "app-with-dep"])), 0);
+}
+
+#[test]
 fn test_verify_intact_and_broken() {
     let f = Fixture::new();
     assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
