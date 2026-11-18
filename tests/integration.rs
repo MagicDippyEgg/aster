@@ -1554,6 +1554,147 @@ fn test_history_limit_and_local_timestamp() {
 }
 
 #[test]
+fn test_history_grep_filters_by_message_body() {
+    let f = Fixture::new();
+    f.config.log_history("Installed 'pkgA' version 1.0.0");
+    f.config.log_history("Removed 'pkgB'");
+    f.config.log_history("Installed 'pkgC' version 2.0.0");
+    f.config.log_history("Upgraded 'pkgA' from 1.0.0 to 1.1.0");
+
+    // Plain substring match: 'Installed' only.
+    let out = f.run_cli(&["history", "--grep", "Installed"]);
+    assert_eq!(code(&out), 0);
+    let text = stdout(&out);
+    assert!(text.contains("pkgA"));
+    assert!(text.contains("pkgC"));
+    assert!(!text.contains("Removed 'pkgB'"));
+    assert!(!text.contains("Upgraded 'pkgA'"));
+
+    // Substring on package name: 'pkgA' matches both pkgA entries.
+    let out_a = f.run_cli(&["history", "--grep", "pkgA"]);
+    assert_eq!(code(&out_a), 0);
+    let text_a = stdout(&out_a);
+    assert!(text_a.contains("Installed 'pkgA'"));
+    assert!(text_a.contains("Upgraded 'pkgA'"));
+    assert!(!text_a.contains("pkgB"));
+    assert!(!text_a.contains("pkgC"));
+
+    // Regex: 'version [0-9]' matches both Installed entries.
+    let out_re = f.run_cli(&["history", "--grep", "version [0-9]"]);
+    assert_eq!(code(&out_re), 0);
+    let text_re = stdout(&out_re);
+    assert!(text_re.contains("Installed 'pkgA'"));
+    assert!(text_re.contains("Installed 'pkgC'"));
+    assert!(!text_re.contains("Removed 'pkgB'"));
+    assert!(!text_re.contains("Upgraded"));
+}
+
+#[test]
+fn test_history_grep_does_not_search_the_timestamp_prefix() {
+    let f = Fixture::new();
+    // The timestamp prefix always contains digits. Searching for a digit
+    // pattern in the BODY only must NOT match every line via the timestamp.
+    f.config.log_history("Installed 'pkgA' version 1.0.0");
+    f.config.log_history("Removed 'pkgB'"); // body has no digits
+
+    let out = f.run_cli(&["history", "--grep", "[0-9]"]);
+    assert_eq!(code(&out), 0);
+    let text = stdout(&out);
+    assert!(text.contains("Installed 'pkgA'")); // body has 1.0.0
+    assert!(!text.contains("Removed 'pkgB'")); // body has no digits
+}
+
+#[test]
+fn test_history_grep_invalid_regex_returns_error() {
+    let f = Fixture::new();
+    f.config.log_history("Entry 1");
+    let out = f.run_cli(&["history", "--grep", "("]);
+    assert_ne!(code(&out), 0);
+    let text = stdout(&out);
+    let err = stderr(&out);
+    let combined = format!("{text}\n{err}");
+    assert!(combined.contains("Invalid --grep regex"));
+}
+
+#[test]
+fn test_history_since_filters_by_date_only_form() {
+    let f = Fixture::new();
+    // Three entries on the same wall-clock day (timestamps are real local
+    // time via libc::localtime). 'since' with a date far in the past keeps
+    // all of them; 'since' with a date in the future keeps none.
+    f.config.log_history("Entry 1");
+    f.config.log_history("Entry 2");
+    f.config.log_history("Entry 3");
+
+    // Past date: all entries kept.
+    let out_past = f.run_cli(&["history", "--since", "1970-01-01"]);
+    assert_eq!(code(&out_past), 0);
+    let text_past = stdout(&out_past);
+    assert!(text_past.contains("Entry 1"));
+    assert!(text_past.contains("Entry 2"));
+    assert!(text_past.contains("Entry 3"));
+
+    // Future date: no entries.
+    let out_future = f.run_cli(&["history", "--since", "2999-01-01"]);
+    assert_eq!(code(&out_future), 0);
+    assert!(stdout(&out_future).contains("No history entries match the given filters."));
+}
+
+#[test]
+fn test_history_since_invalid_value_returns_error() {
+    let f = Fixture::new();
+    f.config.log_history("Entry 1");
+    let out = f.run_cli(&["history", "--since", "not-a-date"]);
+    assert_ne!(code(&out), 0);
+    let text = stdout(&out);
+    let err = stderr(&out);
+    let combined = format!("{text}\n{err}");
+    assert!(combined.contains("Invalid --since value"));
+    assert!(combined.contains("YYYY-MM-DD"));
+}
+
+#[test]
+fn test_history_combines_grep_since_and_limit() {
+    let f = Fixture::new();
+    f.config.log_history("Installed 'pkgA' version 1.0.0");
+    f.config.log_history("Removed 'pkgA'");
+    f.config.log_history("Installed 'pkgB' version 2.0.0");
+    f.config.log_history("Installed 'pkgC' version 3.0.0");
+
+    // grep 'Installed' + since 1970 + limit 2: should keep the LAST two
+    // matching entries (pkgB and pkgC).
+    let out = f.run_cli(&[
+        "history",
+        "--grep",
+        "Installed",
+        "--since",
+        "1970-01-01",
+        "--limit",
+        "2",
+    ]);
+    assert_eq!(code(&out), 0);
+    let text = stdout(&out);
+    assert!(text.contains("pkgB"));
+    assert!(text.contains("pkgC"));
+    assert!(
+        !text.contains("pkgA"),
+        "pkgA entries should have been dropped by --limit 2"
+    );
+    assert!(!text.contains("Removed"));
+}
+
+#[test]
+fn test_history_empty_after_filters_says_no_match() {
+    let f = Fixture::new();
+    f.config.log_history("Installed 'pkgA' version 1.0.0");
+    f.config.log_history("Removed 'pkgA'");
+
+    let out = f.run_cli(&["history", "--grep", "nonexistent-pattern-xyz"]);
+    assert_eq!(code(&out), 0);
+    assert!(stdout(&out).contains("No history entries match the given filters."));
+}
+
+#[test]
 fn test_install_dry_run() {
     let f = Fixture::new();
     assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);

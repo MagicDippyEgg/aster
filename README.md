@@ -31,6 +31,9 @@ aster remove <package>     # uninstall a package
 aster outdated             # list installed packages with newer catalogue versions available
 aster upgrade [package]    # upgrade one (or all) installed packages
 aster upgrade -y           # upgrade all without prompting on custom build steps
+aster history              # show history log of package operations
+aster history --grep <pat> # filter history entries whose message matches a regex
+aster history --since <date> # filter history entries on or after a date (YYYY-MM-DD)
 aster self-update          # update aster to the latest release
 aster doctor               # check the installation for problems
 ```

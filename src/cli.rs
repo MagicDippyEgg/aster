@@ -74,6 +74,15 @@ enum Commands {
     History {
         #[arg(long)]
         limit: Option<usize>,
+        /// Filter to entries whose message matches this regex (case-sensitive).
+        /// Searches the message body only, not the timestamp prefix.
+        #[arg(long)]
+        grep: Option<String>,
+        /// Filter to entries on or after this timestamp. Accepts either
+        /// 'YYYY-MM-DD' (treated as 'YYYY-MM-DD 00:00:00') or the full
+        /// 'YYYY-MM-DD HH:MM:SS' form.
+        #[arg(long)]
+        since: Option<String>,
     },
     /// Refresh package indexes and show available updates
     Update,
@@ -391,7 +400,9 @@ fn dispatch(
         Commands::Clean { dry_run } => clean(config, dry_run),
         Commands::Doctor => doctor(config, registry, catalogue),
         Commands::Verify { package } => verify(registry, &package),
-        Commands::History { limit } => history(config, limit),
+        Commands::History { limit, grep, since } => {
+            history(config, limit, grep.as_deref(), since.as_deref())
+        }
         Commands::Update => update(registry, catalogue),
         Commands::Outdated => outdated(registry, catalogue),
         Commands::SelfUpdate => self_update(config),
@@ -1083,24 +1094,112 @@ fn verify(registry: &RegistryManager, target_pkg: &str) -> crate::error::Result<
     }
 }
 
-fn history(config: &AsterConfig, limit: Option<usize>) -> crate::error::Result<i32> {
+fn history(
+    config: &AsterConfig,
+    limit: Option<usize>,
+    grep: Option<&str>,
+    since: Option<&str>,
+) -> crate::error::Result<i32> {
     let history_file = config.logs_dir.join("history.log");
     if !history_file.exists() {
         println!("No history recorded yet.");
-    } else {
-        let content = fs::read_to_string(history_file)?;
-        let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
-        if lines.is_empty() {
-            println!("No history recorded yet.");
+        return Ok(0);
+    }
+    let content = fs::read_to_string(history_file)?;
+    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.is_empty() {
+        println!("No history recorded yet.");
+        return Ok(0);
+    }
+
+    // Compile the grep regex up-front so a bad pattern fails fast with a
+    // clean error rather than silently treating it as 'no match'.
+    let grep_re = match grep {
+        Some(pattern) => Some(regex::Regex::new(pattern).map_err(|e| {
+            crate::error::AsterError::Validation(format!("Invalid --grep regex: {e}"))
+        })?),
+        None => None,
+    };
+
+    // Normalize --since: 'YYYY-MM-DD' becomes 'YYYY-MM-DD 00:00:00' so the
+    // lexicographic comparison matches the start-of-day boundary. Anything
+    // else is taken verbatim (the user can pass 'YYYY-MM-DD HH:MM:SS').
+    let since_normalized: Option<String> = since.map(|s| {
+        if s.len() == 10 && s.as_bytes()[4] == b'-' && s.as_bytes()[7] == b'-' {
+            format!("{s} 00:00:00")
         } else {
-            let display_lines = match limit {
-                Some(n) if n < lines.len() => &lines[lines.len() - n..],
-                _ => &lines[..],
-            };
-            for line in display_lines {
-                println!("{line}");
+            s.to_string()
+        }
+    });
+    if let Some(s) = since_normalized.as_deref() {
+        // Reject obviously malformed --since values rather than producing a
+        // confusingly empty result. We only sanity-check length and the two
+        // delimiter positions; a wrong year/month/day will simply match
+        // nothing, which is the user's problem to spot.
+        let bytes = s.as_bytes();
+        let ok_len = bytes.len() == 19;
+        let ok_dashes = bytes.iter().enumerate().all(|(i, &b)| {
+            (i != 4 && i != 7 && i != 10 && i != 13 && i != 16)
+                || b == b'-'
+                || b == b' '
+                || b == b':'
+        });
+        if !ok_len || !ok_dashes {
+            return Err(crate::error::AsterError::Validation(format!(
+                "Invalid --since value '{s}': expected 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM:SS'."
+            )));
+        }
+    }
+
+    // Split each line into (timestamp, message) so the grep filter only
+    // searches the message body, not the timestamp prefix. History lines
+    // are formatted as '[YYYY-MM-DD HH:MM:SS] <message>'.
+    fn split_line(line: &str) -> (&str, &str) {
+        // [YYYY-MM-DD HH:MM:SS] is exactly 21 characters. Anything without
+        // that bracket prefix is treated as a malformed line whose entire
+        // body is the 'message' (so --grep still works on it).
+        if line.len() >= 22 && line.starts_with('[') && line.as_bytes()[20] == b']' {
+            let timestamp = &line[1..20];
+            let message = line[22..].trim_start();
+            (timestamp, message)
+        } else {
+            ("", line)
+        }
+    }
+
+    let mut filtered: Vec<&str> = Vec::new();
+    for line in &lines {
+        let (timestamp, message) = split_line(line);
+        if let Some(re) = &grep_re {
+            if !re.is_match(message) {
+                continue;
             }
         }
+        if let Some(since_ts) = since_normalized.as_deref() {
+            if timestamp < since_ts {
+                continue;
+            }
+        }
+        filtered.push(line);
+    }
+
+    if filtered.is_empty() {
+        // Distinguish "log file exists but is empty/filtered" from "no log at all".
+        let had_filters = grep.is_some() || since.is_some();
+        if had_filters {
+            println!("No history entries match the given filters.");
+        } else {
+            println!("No history recorded yet.");
+        }
+        return Ok(0);
+    }
+
+    let display_lines: &[&str] = match limit {
+        Some(n) if n < filtered.len() => &filtered[filtered.len() - n..],
+        _ => &filtered[..],
+    };
+    for line in display_lines {
+        println!("{line}");
     }
     Ok(0)
 }
