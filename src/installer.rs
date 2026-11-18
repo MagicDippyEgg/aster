@@ -11,6 +11,7 @@ use crate::util::{
     collect_files, exists_or_symlink, find_file, is_executable, py_get_bool, py_str, set_mode,
     which,
 };
+use crate::version::compare_versions;
 use flate2::read::GzDecoder;
 use regex::Regex;
 use serde_json::{Map, Value};
@@ -186,6 +187,25 @@ struct DryRunPlanEntry {
     build_system: Option<String>,
     build_steps: Vec<String>,
     is_installed: bool,
+}
+
+/// A single resolved row in the dry-run upgrade plan, shared between
+/// `build_upgrade_plan_entry` and `print_upgrade_plan`.
+struct UpgradePlanEntry {
+    id: String,
+    from: String,
+    to: String,
+    repo: String,
+    pkg_type: String,
+    size: Option<u64>,
+    added: Vec<String>,
+    removed: Vec<String>,
+    unchanged: Vec<String>,
+    /// True when the catalogue definition declared an `executables` list
+    /// (cargo source packages always do; other types only when the
+    /// catalogue author was explicit). False means new binaries will be
+    /// discovered at upgrade time and we can't show a diff.
+    has_declared_new_binaries: bool,
 }
 
 /// Formats a byte count in human-readable form (e.g. "3.4 MB", "12 KB",
@@ -804,6 +824,339 @@ impl PackageInstaller {
             };
             Err(AsterError::Runtime(err_msg))
         }
+    }
+
+    /// Performs a dry run of an upgrade: shows FROM -> TO version, repo, type,
+    /// estimated download size, and which provided binaries would change, for
+    /// each installed package that has a newer catalogue version. Returns 0
+    /// when at least one package would be upgraded, and 1 when there is nothing
+    /// to upgrade (or when a single targeted package is not installed / has no
+    /// catalogue definition / is already at the latest version).
+    pub fn dry_run_upgrade(
+        &self,
+        package_id: &str,
+        _auto_yes: bool,
+        _verbose: bool,
+    ) -> Result<i32> {
+        // Refresh indexes so the dry-run reflects the latest catalogue state,
+        // mirroring the real `aster upgrade` behavior.
+        self.catalogue.update_all()?;
+
+        if !package_id.is_empty() {
+            return self.dry_run_upgrade_single(package_id);
+        }
+        self.dry_run_upgrade_all()
+    }
+
+    fn dry_run_upgrade_single(&self, package_id: &str) -> Result<i32> {
+        if !self.registry.is_installed(package_id)? {
+            println!("Package '{package_id}' is not installed.");
+            return Ok(1);
+        }
+        let inst_info = self.registry.get_installed_package(package_id)?;
+        let pkg_def_with_source = self
+            .catalogue
+            .get_package_definition_with_source(package_id, None)?;
+        let (pkg_def, repo) = match pkg_def_with_source {
+            Some(d) => d,
+            None => {
+                println!("No definition found for '{package_id}' in catalogue.");
+                return Ok(1);
+            }
+        };
+        let inst_ver = inst_info
+            .as_ref()
+            .and_then(|v| v.get("version"))
+            .map(py_str)
+            .unwrap_or_default();
+        let avail_ver = pkg_def.get("version").map(py_str).unwrap_or_default();
+        if compare_versions(&inst_ver, &avail_ver) >= 0 {
+            println!("Package '{package_id}' is already at latest version ({inst_ver}).");
+            return Ok(1);
+        }
+
+        let entries = vec![self.build_upgrade_plan_entry(package_id, &pkg_def, &repo)?];
+        self.print_upgrade_plan(entries);
+        Ok(0)
+    }
+
+    fn dry_run_upgrade_all(&self) -> Result<i32> {
+        let installed = self.registry.list_installed()?;
+        if installed.is_empty() {
+            println!("No packages currently installed.");
+            return Ok(1);
+        }
+
+        let mut entries: Vec<UpgradePlanEntry> = Vec::new();
+        for pkg_id in installed.keys() {
+            let pkg_def_with_source = self
+                .catalogue
+                .get_package_definition_with_source(pkg_id, None)?;
+            let (pkg_def, repo) = match pkg_def_with_source {
+                Some(d) => d,
+                None => continue,
+            };
+            let inst_ver = installed
+                .get(pkg_id)
+                .and_then(|v| v.get("version"))
+                .map(py_str)
+                .unwrap_or_default();
+            let avail_ver = pkg_def.get("version").map(py_str).unwrap_or_default();
+            if compare_versions(&inst_ver, &avail_ver) < 0 {
+                entries.push(self.build_upgrade_plan_entry(pkg_id, &pkg_def, &repo)?);
+            }
+        }
+
+        if entries.is_empty() {
+            println!("All packages are already up to date.");
+            return Ok(1);
+        }
+
+        self.print_upgrade_plan(entries);
+        Ok(0)
+    }
+
+    fn build_upgrade_plan_entry(
+        &self,
+        pkg_id: &str,
+        pkg_def: &Value,
+        repo: &str,
+    ) -> Result<UpgradePlanEntry> {
+        let inst_info = self.registry.get_installed_package(pkg_id)?;
+        let inst_ver = inst_info
+            .as_ref()
+            .and_then(|v| v.get("version"))
+            .map(py_str)
+            .unwrap_or_default();
+        let avail_ver = pkg_def.get("version").map(py_str).unwrap_or_default();
+
+        let pkg_type = pkg_def
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        // Currently-installed binaries.
+        let current_binaries: Vec<String> = inst_info
+            .as_ref()
+            .and_then(|v| v.get("provided_binaries"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|b| b.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Newly-declared binaries (only for cargo source packages).
+        let build_system_str = pkg_def
+            .get("build")
+            .and_then(|b| b.get("system"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let new_binaries: Vec<String> = if pkg_type == "source" && build_system_str == "cargo" {
+            pkg_def
+                .get("executables")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            // For binary / cmake / make / custom-steps: we can't predict what
+            // the new version will install; only display the diff if the new
+            // catalogue declares 'executables' explicitly.
+            pkg_def
+                .get("executables")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        // Compute added / removed binaries (only meaningful when we have a
+        // declared new_binaries list; otherwise we say 'unknown').
+        let (added, removed, unchanged) = if new_binaries.is_empty() {
+            (Vec::new(), Vec::new(), Vec::new())
+        } else {
+            let current_set: std::collections::HashSet<&String> = current_binaries.iter().collect();
+            let new_set: std::collections::HashSet<&String> = new_binaries.iter().collect();
+            let added: Vec<String> = new_binaries
+                .iter()
+                .filter(|b| !current_set.contains(*b))
+                .cloned()
+                .collect();
+            let removed: Vec<String> = current_binaries
+                .iter()
+                .filter(|b| !new_set.contains(*b))
+                .cloned()
+                .collect();
+            let unchanged: Vec<String> = current_binaries
+                .iter()
+                .filter(|b| new_set.contains(*b))
+                .cloned()
+                .collect();
+            (added, removed, unchanged)
+        };
+
+        // Predict download size (same logic as install dry_run).
+        let size: Option<u64> = if pkg_type == "binary" {
+            let platform_key = get_platform_key();
+            pkg_def
+                .get("downloads")
+                .and_then(|v| v.as_object())
+                .and_then(|d| d.get(&platform_key))
+                .and_then(|d| d.get("url"))
+                .and_then(|v| v.as_str())
+                .and_then(|url| fetch_content_length(url, 10))
+        } else if pkg_type == "source" {
+            let stype = pkg_def
+                .get("source")
+                .and_then(|s| s.get("type"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if stype == "git" {
+                None
+            } else {
+                pkg_def
+                    .get("source")
+                    .and_then(|s| s.get("url"))
+                    .and_then(|v| v.as_str())
+                    .and_then(|url| fetch_content_length(url, 10))
+            }
+        } else {
+            None
+        };
+
+        Ok(UpgradePlanEntry {
+            id: pkg_id.to_string(),
+            from: inst_ver,
+            to: avail_ver,
+            repo: repo.to_string(),
+            pkg_type,
+            size,
+            added,
+            removed,
+            unchanged,
+            has_declared_new_binaries: !new_binaries.is_empty(),
+        })
+    }
+
+    fn print_upgrade_plan(&self, entries: Vec<UpgradePlanEntry>) {
+        let scope = if entries.len() == 1 {
+            format!("'{}'", entries[0].id)
+        } else {
+            format!("{} packages", entries.len())
+        };
+        println!("Dry run: Upgrade plan for {scope}:");
+        println!("{}", "=".repeat(60));
+
+        // Compute column widths.
+        let max_pkg_len = entries
+            .iter()
+            .map(|e| e.id.len())
+            .max()
+            .unwrap_or(10)
+            .max(11); // "PACKAGE ID"
+        let pkg_id_width = max_pkg_len + 2;
+
+        let max_from_len = entries
+            .iter()
+            .map(|e| e.from.len().max(e.to.len()))
+            .max()
+            .unwrap_or(5)
+            .max(4); // "FROM" or "TO"
+        let from_to_width = max_from_len + 2;
+
+        let max_repo_len = entries
+            .iter()
+            .map(|e| e.repo.len())
+            .max()
+            .unwrap_or(4)
+            .max(10); // "REPOSITORY"
+        let repo_width = max_repo_len + 2;
+
+        let header = format!(
+            "{:<4} {:<pkg_id_width$} {:<from_to_width$} {:<from_to_width$} {:<repo_width$} {:<10} {:<9}",
+            "#", "PACKAGE ID", "FROM", "TO", "REPOSITORY", "TYPE", "SIZE"
+        );
+        let sep_len = std::cmp::max(75, header.len());
+        println!("{header}");
+        println!("{}", "-".repeat(sep_len));
+
+        for (idx, e) in entries.iter().enumerate() {
+            let size_str = match e.size {
+                Some(s) => format_size(s),
+                None => "?".to_string(),
+            };
+            println!(
+                "{:<4} {:<pkg_id_width$} {:<from_to_width$} {:<from_to_width$} {:<repo_width$} {:<10} {:<9}",
+                idx + 1,
+                e.id,
+                e.from,
+                e.to,
+                e.repo,
+                e.pkg_type,
+                size_str,
+            );
+        }
+
+        // Binary changes section.
+        println!();
+        println!("Provided command changes:");
+        let mut any_diff = false;
+        for e in &entries {
+            if !e.has_declared_new_binaries {
+                continue;
+            }
+            if e.added.is_empty() && e.removed.is_empty() {
+                if !e.unchanged.is_empty() {
+                    println!(
+                        "  {}: {} (unchanged) — {}",
+                        e.id,
+                        e.unchanged.join(", "),
+                        e.unchanged.len()
+                    );
+                }
+                continue;
+            }
+            any_diff = true;
+            let mut parts: Vec<String> = Vec::new();
+            if !e.added.is_empty() {
+                parts.push(format!("+{}", e.added.join(", ")));
+            }
+            if !e.removed.is_empty() {
+                parts.push(format!("-{}", e.removed.join(", ")));
+            }
+            if !e.unchanged.is_empty() {
+                parts.push(format!("={}", e.unchanged.join(", ")));
+            }
+            println!("  {}: {}", e.id, parts.join(" "));
+        }
+        if !any_diff {
+            // Either every entry had only unchanged binaries, or none declared
+            // new binaries. In the latter case, print a fallback note.
+            let any_declared = entries.iter().any(|e| e.has_declared_new_binaries);
+            if !any_declared {
+                println!(
+                    "  (no declared executables; new binaries will be discovered at upgrade time)"
+                );
+            }
+        }
+
+        // Summary.
+        let total_size: u64 = entries.iter().filter_map(|e| e.size).sum();
+        println!();
+        println!(
+            "Summary: {} to upgrade, ~{} to download.",
+            entries.len(),
+            format_size(total_size)
+        );
     }
 
     /// Installs a package and its dependencies by ID.

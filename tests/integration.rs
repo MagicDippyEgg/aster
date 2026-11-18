@@ -1838,6 +1838,215 @@ fn test_remove_dry_run_force_notes_dependents_will_be_broken() {
 }
 
 #[test]
+fn test_upgrade_dry_run_returns_one_when_everything_up_to_date() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+    assert_eq!(code(&f.run_cli(&["install", "fastfetch-bin"])), 0);
+
+    let out = f.run_cli(&["upgrade", "--dry-run"]);
+    assert_eq!(code(&out), 1);
+    let text = stdout(&out);
+    assert!(text.contains("All packages are already up to date."));
+}
+
+#[test]
+fn test_upgrade_dry_run_shows_from_to_versions_for_outdated_package() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+    assert_eq!(code(&f.run_cli(&["install", "fastfetch-bin"])), 0);
+
+    // Downgrade the recorded installed version so the catalogue version
+    // appears newer.
+    let mut data = f.config.load_json(&f.config.packages_json).unwrap();
+    data["installed"]["fastfetch-bin"]["version"] = json!("0.0.1-old");
+    f.config
+        .save_json_atomic(&f.config.packages_json, &serde_json::Value::Object(data))
+        .unwrap();
+
+    let out = f.run_cli(&["upgrade", "--dry-run"]);
+    assert_eq!(code(&out), 0);
+    let text = stdout(&out);
+    assert!(text.contains("Dry run: Upgrade plan"));
+    assert!(text.contains("fastfetch-bin"));
+    assert!(text.contains("0.0.1-old"));
+    assert!(text.contains("2.30.0"));
+    assert!(text.contains("FROM"));
+    assert!(text.contains("TO"));
+    assert!(text.contains("Summary: 1 to upgrade"));
+
+    // The dry-run must not have changed the installed version.
+    let info = f
+        .registry()
+        .get_installed_package("fastfetch-bin")
+        .unwrap()
+        .unwrap();
+    assert_eq!(info["version"], "0.0.1-old");
+}
+
+#[test]
+fn test_upgrade_dry_run_single_package_returns_one_when_not_installed() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+
+    let out = f.run_cli(&["upgrade", "--dry-run", "not-installed-pkg"]);
+    assert_eq!(code(&out), 1);
+    assert!(stdout(&out).contains("not installed"));
+}
+
+#[test]
+fn test_upgrade_dry_run_single_package_returns_one_when_already_latest() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+    assert_eq!(code(&f.run_cli(&["install", "fastfetch-bin"])), 0);
+
+    let out = f.run_cli(&["upgrade", "--dry-run", "fastfetch-bin"]);
+    assert_eq!(code(&out), 1);
+    assert!(stdout(&out).contains("already at latest version"));
+}
+
+#[test]
+fn test_upgrade_dry_run_shows_provided_command_diff_for_cargo_source_pkg() {
+    let f = Fixture::new();
+
+    // Build a cargo-source package v1 with executables=[toolA].
+    let repo_dir = f.temp.path().join("upg_cargo_repo");
+    fs::create_dir_all(repo_dir.join("packages")).unwrap();
+
+    let v1_archive = f.temp.path().join("cargo-v1.tar.gz");
+    make_tar_gz(
+        &v1_archive,
+        &[("Cargo.toml", b"[package]\nname='tool'\n", 0o644)],
+    );
+
+    write_json(
+        &repo_dir.join("index.json"),
+        &json!({
+            "schema_version": 1,
+            "packages": {
+                "cargopkg": {"definition": "packages/cargopkg.json", "type": "source", "description": "Cargo Pkg"}
+            }
+        }),
+    );
+    write_json(
+        &repo_dir.join("packages/cargopkg.json"),
+        &json!({
+            "schema_version": 1,
+            "id": "cargopkg",
+            "name": "cargopkg",
+            "version": "1.0.0",
+            "type": "source",
+            "source": {"type": "tar.gz", "url": format!("file://{}", v1_archive.display())},
+            "build": {"system": "cargo", "release": true},
+            "executables": ["toolA"]
+        }),
+    );
+
+    let repos = json!({
+        "schema_version": 1,
+        "repositories": {
+            "default": {"name": "default", "url": repo_dir.to_string_lossy(), "priority": 100}
+        }
+    });
+    f.config
+        .save_json_atomic(&f.config.repositories_json, &repos)
+        .unwrap();
+
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+
+    // Install v1. We can't actually run cargo here, so write the installed
+    // registry entry directly and create the package directory + symlink by
+    // hand to simulate a successful v1 install.
+    fs::create_dir_all(f.config.packages_dir.join("cargopkg").join("bin")).unwrap();
+    fs::write(
+        f.config
+            .packages_dir
+            .join("cargopkg")
+            .join("bin")
+            .join("toolA"),
+        b"#!/bin/sh\necho toolA",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(
+        f.config
+            .packages_dir
+            .join("cargopkg")
+            .join("bin")
+            .join("toolA"),
+        std::fs::Permissions::from_mode(0o755),
+    );
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        f.config
+            .packages_dir
+            .join("cargopkg")
+            .join("bin")
+            .join("toolA"),
+        f.config.bin_dir.join("toolA"),
+    )
+    .unwrap();
+
+    let registry = f.registry();
+    registry
+        .register_package(
+            "cargopkg",
+            "cargopkg",
+            "1.0.0",
+            "source",
+            &["bin/toolA".to_string()],
+            &["toolA".to_string()],
+            "default",
+            None,
+        )
+        .unwrap();
+    drop(registry);
+
+    // Bump the catalogue to v2 with executables=[toolA, toolB] (toolB added).
+    write_json(
+        &repo_dir.join("packages/cargopkg.json"),
+        &json!({
+            "schema_version": 1,
+            "id": "cargopkg",
+            "name": "cargopkg",
+            "version": "2.0.0",
+            "type": "source",
+            "source": {"type": "tar.gz", "url": format!("file://{}", v1_archive.display())},
+            "build": {"system": "cargo", "release": true},
+            "executables": ["toolA", "toolB"]
+        }),
+    );
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+
+    // Dry-run the upgrade. Should show +toolB in the provided command changes.
+    let out = f.run_cli(&["upgrade", "--dry-run", "cargopkg"]);
+    assert_eq!(code(&out), 0);
+    let text = stdout(&out);
+    assert!(text.contains("cargopkg"));
+    assert!(text.contains("1.0.0"));
+    assert!(text.contains("2.0.0"));
+    assert!(text.contains("Provided command changes:"));
+    assert!(text.contains("+toolB"));
+    assert!(text.contains("=toolA"));
+    // The installed version must be unchanged after the dry run.
+    let info = f
+        .registry()
+        .get_installed_package("cargopkg")
+        .unwrap()
+        .unwrap();
+    assert_eq!(info["version"], "1.0.0");
+}
+
+#[test]
+fn test_upgrade_dry_run_returns_one_when_no_packages_installed() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+
+    let out = f.run_cli(&["upgrade", "--dry-run"]);
+    assert_eq!(code(&out), 1);
+    assert!(stdout(&out).contains("No packages currently installed."));
+}
+
+#[test]
 fn test_verify_intact_and_broken() {
     let f = Fixture::new();
     assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
