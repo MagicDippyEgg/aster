@@ -11,6 +11,7 @@ use crate::version::compare_versions;
 use clap::{CommandFactory, Parser, Subcommand};
 use serde_json::{json, Map, Value};
 use std::fs;
+use std::path::Path;
 
 #[derive(Parser)]
 #[command(
@@ -58,7 +59,10 @@ enum Commands {
         dry_run: bool,
     },
     /// Clear temporary build and download caches
-    Clean,
+    Clean {
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+    },
     /// Diagnose installation, path, and tool issues
     Doctor,
     /// Verify intactness of installed packages
@@ -384,7 +388,7 @@ fn dispatch(
                 Ok(0)
             }
         }
-        Commands::Clean => clean(config),
+        Commands::Clean { dry_run } => clean(config, dry_run),
         Commands::Doctor => doctor(config),
         Commands::Verify { package } => verify(registry, &package),
         Commands::History { limit } => history(config, limit),
@@ -757,12 +761,18 @@ fn installed(registry: &RegistryManager, pkg_id: &str) -> crate::error::Result<i
     }
 }
 
-fn clean(config: &AsterConfig) -> crate::error::Result<i32> {
-    for path in [
-        &config.downloads_cache,
-        &config.archives_cache,
-        &config.build_dir,
-    ] {
+fn clean(config: &AsterConfig, dry_run: bool) -> crate::error::Result<i32> {
+    let target_dirs: [(&Path, &str); 3] = [
+        (&config.downloads_cache, "downloads"),
+        (&config.archives_cache, "archives"),
+        (&config.build_dir, "build"),
+    ];
+
+    if dry_run {
+        return clean_dry_run(&target_dirs);
+    }
+
+    for (path, _) in &target_dirs {
         if path.exists() {
             for entry in fs::read_dir(path)? {
                 let entry = entry?;
@@ -777,6 +787,118 @@ fn clean(config: &AsterConfig) -> crate::error::Result<i32> {
     }
     println!("Successfully cleared build and download caches.");
     Ok(0)
+}
+
+fn clean_dry_run(target_dirs: &[(&Path, &str); 3]) -> crate::error::Result<i32> {
+    println!("Dry run: Cleanup plan");
+    println!("{}", "=".repeat(60));
+    println!();
+
+    let mut total_size: u64 = 0;
+    let mut total_entries: u64 = 0;
+    let mut any_populated = false;
+
+    for (path, label) in target_dirs {
+        if !path.exists() {
+            println!("  {label:<12} (directory does not exist): 0 B (0 entries)");
+            continue;
+        }
+        let (size, entries) = dir_size_and_count(path);
+        total_size += size;
+        total_entries += entries;
+        if entries > 0 {
+            any_populated = true;
+            println!(
+                "  {label:<12} {}: {} ({} entries)",
+                path.display(),
+                format_size_cli(size),
+                entries
+            );
+        } else {
+            println!("  {label:<12} {}: 0 B (0 entries)", path.display());
+        }
+    }
+
+    println!();
+    if any_populated {
+        println!(
+            "Summary: would reclaim {} across {} entries.",
+            format_size_cli(total_size),
+            total_entries
+        );
+        println!("Run 'aster clean' (without --dry-run) to actually delete them.");
+    } else {
+        println!("Summary: nothing to reclaim; all cache directories are empty.");
+    }
+
+    Ok(0)
+}
+
+/// Computes the total size (in bytes) and the entry count that 'aster clean'
+/// would delete from `dir`.
+///
+/// - `entries` is the number of DIRECT children of `dir` (each one is
+///   deleted as a unit by the real `clean`).
+/// - `size` is the recursive sum of all file sizes inside those children
+///   (the total bytes that would be freed).
+///
+/// Returns (0, 0) when `dir` does not exist, is not a directory, or is
+/// empty. Symlinks are not followed when computing size (avoids cycles).
+fn dir_size_and_count(dir: &Path) -> (u64, u64) {
+    fn recursive_size(path: &Path) -> u64 {
+        let md = match std::fs::symlink_metadata(path) {
+            Ok(m) => m,
+            Err(_) => return 0,
+        };
+        if md.is_file() {
+            return md.len();
+        }
+        if md.is_dir() {
+            let mut total: u64 = 0;
+            if let Ok(rd) = std::fs::read_dir(path) {
+                for entry in rd.flatten() {
+                    total += recursive_size(&entry.path());
+                }
+            }
+            return total;
+        }
+        // symlinks and other file types: 0 bytes (we don't follow symlinks).
+        0
+    }
+
+    let md = match std::fs::symlink_metadata(dir) {
+        Ok(m) => m,
+        Err(_) => return (0, 0),
+    };
+    if !md.is_dir() {
+        return (0, 0);
+    }
+    let mut total_size: u64 = 0;
+    let mut entries: u64 = 0;
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            entries += 1;
+            total_size += recursive_size(&entry.path());
+        }
+    }
+    (total_size, entries)
+}
+
+/// Renders a byte count in human-readable form. Local to cli.rs to avoid
+/// needing the installer module's version of the same helper.
+fn format_size_cli(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * 1024;
+    const GB: u64 = 1024 * 1024 * 1024;
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 fn doctor(config: &AsterConfig) -> crate::error::Result<i32> {
