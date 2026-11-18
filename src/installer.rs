@@ -2015,6 +2015,144 @@ impl PackageInstaller {
         println!("Successfully removed '{package_id}'.");
         Ok(())
     }
+
+    /// Performs a dry run of removing a package: shows what would be deleted
+    /// (package directory, command symlinks, registry entry) and warns about
+    /// any installed packages that depend on this one when `force` is not
+    /// set. Returns 0 when something would actually be removed and 1 when
+    /// the package is not installed (or there is nothing to do).
+    pub fn dry_run_remove(&self, package_id: &str, force: bool) -> Result<i32> {
+        validate_package_id(package_id)?;
+        if !self.registry.is_installed(package_id)? {
+            println!("Package '{package_id}' is not installed.");
+            return Ok(1);
+        }
+
+        println!("Dry run: Removal plan for '{package_id}':");
+        println!("{}", "=".repeat(60));
+
+        // Reverse-dependency check (skipped when --force).
+        let resolver = DependencyResolver::new(self.catalogue.clone(), self.registry.clone());
+        let dependents = resolver.check_removal_safety(package_id)?;
+        println!();
+        println!("Reverse dependencies:");
+        if dependents.is_empty() {
+            println!("  (none)");
+        } else {
+            for d in &dependents {
+                println!("  - {d}");
+            }
+            if !force {
+                println!();
+                println!(
+                    "Warning: removing '{package_id}' would break the {} installed package(s) above.",
+                    dependents.len()
+                );
+                println!(
+                    "         Re-run with --force to remove anyway (the dependents will be left broken)."
+                );
+            } else {
+                println!();
+                println!(
+                    "Note: --force is set; the {} dependent package(s) above will be left installed but broken.",
+                    dependents.len()
+                );
+            }
+        }
+
+        let pkg_info = self.registry.get_installed_package(package_id)?;
+        let provided_binaries: Vec<String> = pkg_info
+            .as_ref()
+            .and_then(|v| v.get("provided_binaries"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|b| b.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let pkg_dir = self.config.packages_dir.join(package_id);
+        let installed_files: Vec<String> = pkg_info
+            .as_ref()
+            .and_then(|v| v.get("installed_files"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|b| b.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Package directory section.
+        println!();
+        println!("Would delete:");
+        if pkg_dir.exists() {
+            println!("  Package directory: {}", pkg_dir.display());
+            if !installed_files.is_empty() {
+                println!(
+                    "    ({} recorded file(s) under this directory)",
+                    installed_files.len()
+                );
+            }
+        } else {
+            println!(
+                "  Package directory: {} (missing on disk; only the registry entry will be removed)",
+                pkg_dir.display()
+            );
+        }
+
+        // Command symlinks section.
+        if !provided_binaries.is_empty() {
+            let mut would_remove_links: Vec<(String, String)> = Vec::new();
+            let mut owned_by_others: Vec<String> = Vec::new();
+            for bin_name in &provided_binaries {
+                let link_path = self.config.bin_dir.join(bin_name);
+                if exists_or_symlink(&link_path) {
+                    if self.symlink_points_to_package(&link_path, package_id) {
+                        would_remove_links
+                            .push((bin_name.clone(), link_path.to_string_lossy().to_string()));
+                    } else {
+                        owned_by_others.push(bin_name.clone());
+                    }
+                } else {
+                    would_remove_links.push((
+                        bin_name.clone(),
+                        link_path.to_string_lossy().to_string() + " (already gone)",
+                    ));
+                }
+            }
+            println!("  Command symlinks:");
+            if would_remove_links.is_empty() {
+                println!("    (none owned by this package would be removed)");
+            } else {
+                for (name, path) in &would_remove_links {
+                    println!("    - {name} -> {path}");
+                }
+            }
+            if !owned_by_others.is_empty() {
+                println!("    Note: {} command(s) [{}] exist but point to a different package; they will NOT be removed.",
+                    owned_by_others.len(), owned_by_others.join(", "));
+            }
+        }
+
+        println!("  Registry entry for '{package_id}' in packages.json");
+
+        // Summary.
+        println!();
+        let dep_block = if dependents.is_empty() {
+            "no reverse dependencies".to_string()
+        } else if force {
+            format!(
+                "--force set, {} dependent(s) will be broken",
+                dependents.len()
+            )
+        } else {
+            format!("BLOCKED: {} dependent(s) need --force", dependents.len())
+        };
+        println!("Summary: would remove '{package_id}' ({dep_block}).");
+        Ok(0)
+    }
 }
 
 /// Gets a safe asset filename without its query or fragment.
