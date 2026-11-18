@@ -362,11 +362,11 @@ fn dispatch(
             dry_run,
         } => {
             if dry_run {
-                installer.dry_run(&package)?;
+                installer.dry_run(&package)
             } else {
                 installer.install(&package, yes, verbose)?;
+                Ok(0)
             }
-            Ok(0)
         }
         Commands::Remove { package, force } => {
             installer.remove(&package, force)?;

@@ -106,6 +106,45 @@ pub fn fetch_url_to_file(
     }
 }
 
+/// Returns the Content-Length of a URL by issuing an HTTP GET request and
+/// reading only the response headers (the body is not consumed).
+///
+/// Used by `aster install --dry-run` to estimate download sizes without
+/// fetching the body. Returns `None` when the server does not respond or
+/// does not advertise a Content-Length header (for example chunked-transfer
+/// or git-clone URLs). Never panics or errors so dry-run output degrades
+/// gracefully to a `?` size cell.
+///
+/// Uses GET instead of HEAD because some download hosts (notably GitHub's
+/// `github.com/.../releases/download/...` 302-redirect chain) return a
+/// `Content-Length: 0` for the HEAD response on the redirecting URL but a
+/// real Content-Length on the GET response after following the redirect.
+pub fn fetch_content_length(url: &str, timeout: u64) -> Option<u64> {
+    if url.starts_with("file://") {
+        let path = std::path::PathBuf::from(url.trim_start_matches("file://"));
+        return std::fs::metadata(&path).ok().map(|m| m.len());
+    }
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return None;
+    }
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout))
+        .build()
+        .ok()?;
+
+    let ua = reqwest::header::HeaderValue::from_str(USER_AGENT).ok()?;
+    let resp = client
+        .get(url)
+        .header(reqwest::header::USER_AGENT, ua)
+        .send()
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    resp.content_length()
+}
+
 /// Downloads content from a URL directly to `dest_path`, reporting progress via callback.
 pub fn fetch_url_to_file_with_progress<F>(
     url: &str,

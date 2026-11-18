@@ -1570,6 +1570,168 @@ fn test_install_dry_run() {
 }
 
 #[test]
+fn test_install_dry_run_shows_size_and_summary_for_binary_packages() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+
+    let out = f.run_cli(&["install", "--dry-run", "fastfetch-bin"]);
+    assert_eq!(code(&out), 0);
+    let text = stdout(&out);
+    assert!(text.contains("fastfetch-bin"));
+    assert!(text.contains("binary"));
+    assert!(text.contains("To install"));
+    // Size column should be present and show a non-empty value (file:// URLs
+    // produce real sizes via fs::metadata).
+    assert!(text.contains("SIZE"));
+    // Summary line at the end.
+    assert!(text.contains("Summary: 1 to install, 0 already installed"));
+    assert!(text.contains("to download."));
+    // No source/build details section for binary packages.
+    assert!(!text.contains("Source/build details:"));
+    // Conflicts section is always present (with "(none)" when empty).
+    assert!(text.contains("Conflicts:"));
+    assert!(text.contains("(none)"));
+}
+
+#[test]
+fn test_install_dry_run_shows_source_build_details_for_source_packages() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+
+    // test-src is a make-system source package.
+    let out = f.run_cli(&["install", "--dry-run", "test-src"]);
+    assert_eq!(code(&out), 0);
+    let text = stdout(&out);
+    assert!(text.contains("test-src"));
+    assert!(text.contains("source"));
+    assert!(text.contains("Source/build details:"));
+    assert!(text.contains("test-src:"));
+    assert!(text.contains("Source type:"));
+    assert!(text.contains("Source URL:"));
+    assert!(text.contains("Build system: make"));
+}
+
+#[test]
+fn test_install_dry_run_warns_about_custom_build_steps_prompt() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+
+    // htop-src uses custom build.steps and will prompt at install time.
+    let out = f.run_cli(&["install", "--dry-run", "htop-src"]);
+    assert_eq!(code(&out), 0);
+    let text = stdout(&out);
+    assert!(text.contains("Build steps:"));
+    assert!(text.contains("mkdir -p staging_bin"));
+    assert!(text.contains("custom build steps will prompt"));
+    assert!(text.contains("-y to skip"));
+}
+
+#[test]
+fn test_install_dry_run_returns_one_when_everything_already_installed() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+
+    // Install fastfetch-bin for real.
+    assert_eq!(code(&f.run_cli(&["install", "fastfetch-bin"])), 0);
+
+    // Dry-run on the already-installed package must exit 1.
+    let out = f.run_cli(&["install", "--dry-run", "fastfetch-bin"]);
+    assert_eq!(code(&out), 1);
+    let text = stdout(&out);
+    assert!(text.contains("Already installed"));
+    assert!(text.contains("Nothing to do."));
+    assert!(text.contains("Summary: 0 to install, 1 already installed"));
+}
+
+#[test]
+fn test_install_dry_run_reports_conflicts_with_other_installed_packages() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+    assert_eq!(code(&f.run_cli(&["install", "fastfetch-bin"])), 0);
+
+    // Build a small fixture-extension: a cargo-source package that declares
+    // the same executable name as fastfetch-bin provides ('fastfetch'). The
+    // dry-run must detect this as a conflict against the already-installed
+    // fastfetch-bin (whose installed metadata records provided_binaries:
+    // ["fastfetch"]).
+    let repo_dir = f.temp.path().join("conflict_repo");
+    fs::create_dir_all(repo_dir.join("packages")).unwrap();
+
+    let dummy_archive = f.temp.path().join("dummy-cargo-src.tar.gz");
+    make_tar_gz(&dummy_archive, &[("Cargo.toml", b"...", 0o644)]);
+
+    write_json(
+        &repo_dir.join("index.json"),
+        &json!({
+            "schema_version": 1,
+            "packages": {
+                "fastfetch-conflict": {
+                    "definition": "packages/fastfetch-conflict.json",
+                    "type": "source",
+                    "description": "Conflicts with fastfetch-bin"
+                }
+            }
+        }),
+    );
+    write_json(
+        &repo_dir.join("packages/fastfetch-conflict.json"),
+        &json!({
+            "schema_version": 1,
+            "id": "fastfetch-conflict",
+            "name": "fastfetch-conflict",
+            "version": "0.1.0",
+            "type": "source",
+            "source": {"type": "tar.gz", "url": format!("file://{}", dummy_archive.display())},
+            "build": {"system": "cargo", "release": true},
+            "executables": ["fastfetch"]
+        }),
+    );
+
+    let repos = json!({
+        "schema_version": 1,
+        "repositories": {
+            "default": {"name": "default", "url": f.cat_dir.to_string_lossy(), "priority": 100},
+            "conflict-repo": {"name": "conflict-repo", "url": repo_dir.to_string_lossy(), "priority": 200}
+        }
+    });
+    f.config
+        .save_json_atomic(&f.config.repositories_json, &repos)
+        .unwrap();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+
+    // Dry-run installing the conflict package. Must report a conflict against
+    // fastfetch-bin and must NOT actually install anything.
+    let out = f.run_cli(&["install", "--dry-run", "fastfetch-conflict"]);
+    let text = stdout(&out);
+    assert!(
+        text.to_lowercase().contains("conflict"),
+        "dry-run should mention the conflict, got: {text}"
+    );
+    assert!(text.contains("'fastfetch'"));
+    assert!(text.contains("fastfetch-bin"));
+
+    // And the conflict package was not actually installed.
+    assert_eq!(code(&f.run_cli(&["installed", "fastfetch-conflict"])), 1);
+}
+
+#[test]
+fn test_install_dry_run_lists_all_packages_in_plan() {
+    let f = Fixture::new();
+    assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);
+
+    // app-with-dep depends on dep-lib.
+    let out = f.run_cli(&["install", "--dry-run", "app-with-dep"]);
+    assert_eq!(code(&out), 0);
+    let text = stdout(&out);
+    // Both packages appear in the plan table (not in the title line).
+    let plan_start = text.find("PACKAGE ID").unwrap();
+    let plan_text = &text[plan_start..];
+    assert!(plan_text.contains("dep-lib"));
+    assert!(plan_text.contains("app-with-dep"));
+    assert!(text.contains("Summary: 2 to install"));
+}
+
+#[test]
 fn test_verify_intact_and_broken() {
     let f = Fixture::new();
     assert_eq!(code(&f.run_cli(&["repo", "update"])), 0);

@@ -1,7 +1,7 @@
 //! Installer for binary and source packages.
 
 use crate::catalogue::CatalogueManager;
-use crate::config::{get_build_env, AsterConfig};
+use crate::config::{fetch_content_length, get_build_env, AsterConfig};
 use crate::error::{AsterError, Result};
 use crate::registry::RegistryManager;
 use crate::resolver::DependencyResolver;
@@ -171,6 +171,41 @@ pub fn get_platform_key() -> String {
     format!("{sys_name}-{arch}")
 }
 
+/// A single resolved row in the dry-run installation plan, shared with
+/// `find_dry_run_conflicts` so conflict detection can iterate the same data.
+struct DryRunPlanEntry {
+    id: String,
+    version: String,
+    repo: String,
+    pkg_type: String,
+    size: Option<u64>,
+    provided_binaries: Vec<String>,
+    source_type: Option<String>,
+    source_url: Option<String>,
+    source_ref: Option<String>,
+    build_system: Option<String>,
+    build_steps: Vec<String>,
+    is_installed: bool,
+}
+
+/// Formats a byte count in human-readable form (e.g. "3.4 MB", "12 KB",
+/// "0 B", "1.2 GB"). The threshold rules match what users typically expect
+/// from package managers: KB starts at 1024, MB at 1024^2, GB at 1024^3.
+fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * 1024;
+    const GB: u64 = 1024 * 1024 * 1024;
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 #[derive(Clone)]
 pub struct PackageInstaller {
     pub config: AsterConfig,
@@ -207,8 +242,11 @@ impl PackageInstaller {
         }
     }
 
-    /// Performs a dry run of installing a package, displaying the installation plan.
-    pub fn dry_run(&self, package_id: &str) -> Result<()> {
+    /// Performs a dry run of installing a package, displaying the installation
+    /// plan with download sizes, provided binaries, source/build details, and
+    /// binary conflicts. Returns 0 when at least one package would be installed
+    /// and 1 when everything in the plan is already installed.
+    pub fn dry_run(&self, package_id: &str) -> Result<i32> {
         let resolver = DependencyResolver::new(self.catalogue.clone(), self.registry.clone());
         let install_plan = resolver
             .resolve_dependencies(package_id)
@@ -219,14 +257,11 @@ impl PackageInstaller {
                 other => other,
             })?;
 
-        println!("Dry run: Installation plan for '{package_id}':\n");
-        println!(
-            "{:<4} {:<20} {:<15} {:<15} {:<10} STATUS",
-            "#", "PACKAGE ID", "VERSION", "REPOSITORY", "TYPE"
-        );
-        println!("{}", "-".repeat(75));
+        println!("Dry run: Installation plan for '{package_id}':");
+        println!("{}", "=".repeat(60));
 
-        for (idx, pkg) in install_plan.iter().enumerate() {
+        let mut entries: Vec<DryRunPlanEntry> = Vec::new();
+        for pkg in &install_plan {
             let is_inst = self.registry.is_installed(pkg)?;
             let (pkg_def, source_repo) = self
                 .catalogue
@@ -240,28 +275,307 @@ impl PackageInstaller {
             let version = pkg_def
                 .get("version")
                 .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
+                .unwrap_or("unknown")
+                .to_string();
             let pkg_type = pkg_def
                 .get("type")
                 .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let status = if is_inst {
+                .unwrap_or("unknown")
+                .to_string();
+
+            // Predict download size. Skip when already installed or when the
+            // URL can't be determined. Binary packages use the platform entry;
+            // source packages use the source.url (git source has no size).
+            let mut size: Option<u64> = None;
+            if !is_inst {
+                if pkg_type == "binary" {
+                    let platform_key = get_platform_key();
+                    if let Some(dl) = pkg_def.get("downloads").and_then(|v| v.as_object()) {
+                        if let Some(dl_info) = dl.get(&platform_key) {
+                            if let Some(url) = dl_info.get("url").and_then(|v| v.as_str()) {
+                                size = fetch_content_length(url, 10);
+                            }
+                        }
+                    }
+                } else if pkg_type == "source" {
+                    let stype = pkg_def
+                        .get("source")
+                        .and_then(|s| s.get("type"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if stype != "git" {
+                        if let Some(url) = pkg_def
+                            .get("source")
+                            .and_then(|s| s.get("url"))
+                            .and_then(|v| v.as_str())
+                        {
+                            size = fetch_content_length(url, 10);
+                        }
+                    }
+                }
+            }
+
+            // Declared executables. The `executables` field is only meaningful
+            // for cargo source packages (per the docs); for cmake/make/custom
+            // steps the binaries are discovered at install time from staging
+            // directories.
+            let build_system_str = pkg_def
+                .get("build")
+                .and_then(|b| b.get("system"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let provided_binaries: Vec<String> =
+                if pkg_type == "source" && build_system_str == "cargo" {
+                    pkg_def
+                        .get("executables")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+
+            let source_type = pkg_def
+                .get("source")
+                .and_then(|s| s.get("type"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let source_url = pkg_def
+                .get("source")
+                .and_then(|s| s.get("url"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let source_ref = pkg_def
+                .get("source")
+                .and_then(|s| s.get("ref"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let build_info = pkg_def.get("build").and_then(|v| v.as_object());
+            let build_system = build_info
+                .and_then(|b| b.get("system"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let build_steps: Vec<String> = build_info
+                .and_then(|b| b.get("steps"))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            entries.push(DryRunPlanEntry {
+                id: pkg.clone(),
+                version,
+                repo: source_repo,
+                pkg_type,
+                size,
+                provided_binaries,
+                source_type,
+                source_url,
+                source_ref,
+                build_system,
+                build_steps,
+                is_installed: is_inst,
+            });
+        }
+
+        // Compute column widths for the main table.
+        let max_pkg_len = entries
+            .iter()
+            .map(|e| e.id.len())
+            .max()
+            .unwrap_or(10)
+            .max(11); // "PACKAGE ID"
+        let pkg_id_width = max_pkg_len + 2;
+
+        let max_repo_len = entries
+            .iter()
+            .map(|e| e.repo.len())
+            .max()
+            .unwrap_or(4)
+            .max(10); // "REPOSITORY"
+        let repo_width = max_repo_len + 2;
+
+        let max_bins_len = entries
+            .iter()
+            .map(|e| {
+                if e.provided_binaries.is_empty() {
+                    "(discovered at install time)".len()
+                } else {
+                    e.provided_binaries.join(", ").len()
+                }
+            })
+            .max()
+            .unwrap_or(0)
+            .max(17); // "PROVIDED BINARIES"
+        let bins_width = max_bins_len + 2;
+
+        let header = format!(
+            "{:<4} {:<pkg_id_width$} {:<12} {:<repo_width$} {:<10} {:<9} {:<bins_width$} STATUS",
+            "#", "PACKAGE ID", "VERSION", "REPOSITORY", "TYPE", "SIZE", "PROVIDED BINARIES"
+        );
+        let sep_len = std::cmp::max(75, header.len());
+        println!("{header}");
+        println!("{}", "-".repeat(sep_len));
+
+        for (idx, e) in entries.iter().enumerate() {
+            let size_str = match e.size {
+                Some(s) => format_size(s),
+                None => {
+                    if e.is_installed {
+                        "-".to_string()
+                    } else if e.pkg_type == "source" {
+                        // If source type is git, we can't predict size.
+                        "?".to_string()
+                    } else {
+                        "?".to_string()
+                    }
+                }
+            };
+            let bins_str = if e.provided_binaries.is_empty() {
+                "(discovered at install time)".to_string()
+            } else {
+                e.provided_binaries.join(", ")
+            };
+            let status = if e.is_installed {
                 "Already installed"
             } else {
                 "To install"
             };
-
             println!(
-                "{:<4} {:<20} {:<15} {:<15} {:<10} {status}",
+                "{:<4} {:<pkg_id_width$} {:<12} {:<repo_width$} {:<10} {:<9} {:<bins_width$} {status}",
                 idx + 1,
-                pkg,
-                version,
-                source_repo,
-                pkg_type
+                e.id,
+                e.version,
+                e.repo,
+                e.pkg_type,
+                size_str,
+                bins_str,
             );
         }
 
-        Ok(())
+        // Source/build details for source packages being installed.
+        let source_pkgs_to_install: Vec<&DryRunPlanEntry> = entries
+            .iter()
+            .filter(|e| e.pkg_type == "source" && !e.is_installed)
+            .collect();
+        if !source_pkgs_to_install.is_empty() {
+            println!();
+            println!("Source/build details:");
+            for e in source_pkgs_to_install {
+                println!("  {}:", e.id);
+                if let Some(st) = &e.source_type {
+                    println!("    Source type: {st}");
+                }
+                if let Some(url) = &e.source_url {
+                    println!("    Source URL:  {url}");
+                }
+                if let Some(r) = &e.source_ref {
+                    println!("    Source ref:  {r}");
+                }
+                if let Some(bs) = &e.build_system {
+                    println!("    Build system: {bs}");
+                }
+                if !e.build_steps.is_empty() {
+                    println!("    Build steps:");
+                    for s in &e.build_steps {
+                        println!("      - {s}");
+                    }
+                    println!("    Note: custom build steps will prompt for confirmation; pass -y to skip.");
+                }
+                if !e.provided_binaries.is_empty() {
+                    println!(
+                        "    Will install executables: {}",
+                        e.provided_binaries.join(", ")
+                    );
+                }
+            }
+        }
+
+        // Conflicts: declared executables (cargo source) that already exist as
+        // symlinks pointing to a different installed package.
+        let conflicts = self.find_dry_run_conflicts(&entries)?;
+        println!();
+        println!("Conflicts:");
+        if conflicts.is_empty() {
+            println!("  (none)");
+        } else {
+            for c in &conflicts {
+                println!("  - {c}");
+            }
+        }
+
+        // Summary line.
+        let to_install = entries.iter().filter(|e| !e.is_installed).count();
+        let already = entries.iter().filter(|e| e.is_installed).count();
+        let total_size: u64 = entries.iter().filter_map(|e| e.size).sum();
+        println!();
+        println!(
+            "Summary: {to_install} to install, {already} already installed, ~{} to download.",
+            format_size(total_size)
+        );
+
+        if to_install == 0 {
+            println!("Nothing to do.");
+            Ok(1)
+        } else {
+            Ok(0)
+        }
+    }
+
+    /// Checks declared `executables` (from cargo source packages) in the dry-run
+    /// plan against existing `$ASTER_HOME/bin/` symlinks and against binaries
+    /// already provided by other installed packages. Returns a list of
+    /// human-readable conflict descriptions.
+    fn find_dry_run_conflicts(&self, entries: &[DryRunPlanEntry]) -> Result<Vec<String>> {
+        let installed = self.registry.list_installed()?;
+        let mut conflicts: Vec<String> = Vec::new();
+
+        for e in entries {
+            if e.is_installed {
+                continue;
+            }
+            for bin in &e.provided_binaries {
+                // Conflict against other installed packages' provided_binaries.
+                for (existing_id, existing_info) in installed.iter() {
+                    if existing_id == &e.id {
+                        continue;
+                    }
+                    let provides = existing_info
+                        .get("provided_binaries")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter().any(|b| b.as_str() == Some(bin.as_str())))
+                        .unwrap_or(false);
+                    if provides {
+                        conflicts.push(format!(
+                            "Package '{}' would install command '{bin}' which is already provided by installed package '{existing_id}'.",
+                            e.id
+                        ));
+                    }
+                }
+
+                // Conflict against stray symlinks on disk that don't belong to
+                // this package.
+                let link_path = self.config.bin_dir.join(bin);
+                if exists_or_symlink(&link_path)
+                    && !self.symlink_points_to_package(&link_path, &e.id)
+                {
+                    conflicts.push(format!(
+                        "Package '{}' would install command '{bin}' but '{}' already exists and is not owned by this package.",
+                        e.id,
+                        link_path.display()
+                    ));
+                }
+            }
+        }
+
+        Ok(conflicts)
     }
 
     /// Upgrades an installed package safely, preserving the previous version and rolling back on failure.
