@@ -86,6 +86,8 @@ enum Commands {
         yes: bool,
         #[arg(short = 'v', long = "verbose")]
         verbose: bool,
+        #[arg(long = "dry-run")]
+        dry_run: bool,
     },
     /// Manage package repositories
     Repo {
@@ -393,7 +395,14 @@ fn dispatch(
             package,
             yes,
             verbose,
-        } => upgrade(registry, catalogue, installer, &package, yes, verbose),
+            dry_run,
+        } => {
+            if dry_run {
+                installer.dry_run_upgrade(&package, yes, verbose)
+            } else {
+                upgrade(registry, catalogue, installer, &package, yes, verbose)
+            }
+        }
         Commands::Repo { command } => repo(config, catalogue, command),
         Commands::Config { command } => config_cmd(config, command),
         Commands::Completions { shell } => completions(shell),
